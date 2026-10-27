@@ -1624,11 +1624,7 @@ QImage applyRedactionsScaled(QImage image, const QVector<Annotation> &redactions
   return image;
 }
 
-/// Largest encoded clipboard image `--clipboard` reads: the same 256 MiB as
-/// Qt's default image allocation limit, well above any real screenshot PNG.
-constexpr qint64 kMaxClipboardImageBytes = qint64(256) * 1024 * 1024;
-
-bool loadClipboardImage(QImage &image, QString &error) {
+bool loadClipboardImage(QImage &image, QString &error, qint64 maxImageBytes) {
   image = {};
   error.clear();
 
@@ -1675,10 +1671,10 @@ bool loadClipboardImage(QImage &image, QString &error) {
     const ProcessResult pasted = runProcess(
         QStringLiteral("wl-paste"),
         {QStringLiteral("--no-newline"), QStringLiteral("--type"), mimeType},
-        {}, 5000, {}, kMaxClipboardImageBytes);
+        {}, 5000, {}, maxImageBytes);
     if (pasted.outputTooLarge) {
       error = QStringLiteral("Clipboard image is too large to open (over %1 MiB)")
-                  .arg(kMaxClipboardImageBytes >> 20);
+                  .arg(maxImageBytes >> 20);
       return false;
     }
     if (!pasted.finished || pasted.exitCode != 0) {

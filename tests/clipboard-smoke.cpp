@@ -145,15 +145,22 @@ bool runClipboardSmoke(QString &error) {
 }
 
 bool runClipboardSizeLimitSmoke(QString &error) {
+  // The production limit stays 256 MiB; the stop-early check below uses a small
+  // one so it never has to push that much data through a pipe.
+  static_assert(kMaxClipboardImageBytes == qint64(256) * 1024 * 1024);
+  constexpr qint64 kTestLimitBytes = qint64(1) * 1024 * 1024;
   const QTemporaryDir directory;
   if (!directory.isValid()) {
     error = QStringLiteral("Could not create clipboard-limit directory");
     return false;
   }
   // The clipboard owner decides how many bytes wl-paste delivers. This one
-  // offers a PNG signature followed by just over 256 MiB, then leaves a
-  // marker once everything was written: the read must stop at the size limit
-  // (stopping wl-paste) rather than buffer the whole stream before refusing it.
+  // offers a PNG signature followed by 4 MiB, well past the 1 MiB test limit,
+  // then leaves a marker once everything was written: the read must stop at
+  // the limit (stopping wl-paste) rather than buffer the whole stream before
+  // refusing it. The pipe holds only about 64 KiB, so wl-paste can run only
+  // that far ahead of the reader and never reaches the marker, however slow
+  // the machine is.
   const QString served =
       QDir(directory.path()).filePath(QStringLiteral("served"));
   const QByteArray script = QByteArrayLiteral(
@@ -166,8 +173,7 @@ bool runClipboardSizeLimitSmoke(QString &error) {
       "if [[ \"${1:-}\" == \"--no-newline\" && \"${2:-}\" == \"--type\" "
       "&& \"${3:-}\" == \"image/png\" ]]; then\n"
       "  printf '\\x89PNG\\r\\n\\x1a\\n'\n"
-      "  head -c 268435456 /dev/zero\n"
-      "  head -c 1048576 /dev/zero\n"
+      "  head -c 4194304 /dev/zero\n"
       "  : > \"$OMASNAP_TEST_CLIPBOARD_SERVED\"\n"
       "  exit 0\n"
       "fi\n"
@@ -188,7 +194,8 @@ bool runClipboardSizeLimitSmoke(QString &error) {
 
   QImage image;
   QString clipboardError;
-  const bool loaded = loadClipboardImage(image, clipboardError);
+  const bool loaded =
+      loadClipboardImage(image, clipboardError, kTestLimitBytes);
   if (loaded || !image.isNull() ||
       !clipboardError.contains(QStringLiteral("too large"),
                                Qt::CaseInsensitive) ||
