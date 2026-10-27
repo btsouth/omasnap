@@ -49,6 +49,7 @@
 #include <QStandardPaths>
 #include <QThread>
 #include <QFile>
+#include <QSaveFile>
 #include <QFileInfo>
 #include <QFontInfo>
 #include <QFontMetricsF>
@@ -58,6 +59,7 @@
 #include <QPlainTextEdit>
 #include <QPixmap>
 #include <QScrollBar>
+#include <QLocale>
 #include <QTemporaryDir>
 #include <QUrl>
 #include <QWheelEvent>
@@ -529,6 +531,86 @@ bool runMeasurementReadoutCheck(QString &error) {
   // frame is settled.
   if (!expect(QString(), QStringLiteral("Settled edit phase")))
     return false;
+  editor.close();
+  return true;
+}
+
+/** Tab locks a dragged area to 1:1, 3:4, or 16:9, and back to free. */
+bool runRegionAspectCheck(QString &error) {
+  CaptureData capture;
+  capture.monitor.geometry = QRect(0, 0, 800, 600);
+  capture.monitor.pixelSize = QSize(800, 600);
+  capture.source = QImage(800, 600, QImage::Format_ARGB32_Premultiplied);
+  capture.source.fill(QColor(QStringLiteral("#6480a0")));
+  capture.previewSize = QSize(800, 600);
+
+  const auto drag = [](CaptureEditor &editor, QPoint from, QPoint to,
+                       bool tabMidDrag) {
+    QTest::mousePress(&editor, Qt::LeftButton, Qt::NoModifier, from);
+    QTest::mouseMove(&editor, to, 20);
+    if (tabMidDrag)
+      QTest::keyClick(&editor, Qt::Key_Tab);
+    const QRectF selection = editor.currentSelection();
+    QTest::mouseRelease(&editor, Qt::LeftButton, Qt::NoModifier, to);
+    return selection;
+  };
+  struct Case {
+    int tabs;
+    QString label;
+    QPoint from;
+    QPoint to;
+    QRectF expected;
+  };
+  const QVector<Case> cases = {
+      {0, QStringLiteral("Free"), {100, 100}, {300, 150}, {100, 100, 200, 50}},
+      {1, QStringLiteral("1:1"), {100, 100}, {300, 150}, {100, 100, 200, 200}},
+      {2, QStringLiteral("3:4"), {400, 300}, {340, 100}, {250, 100, 150, 200}},
+      {3, QStringLiteral("16:9"), {100, 100}, {260, 110}, {100, 100, 160, 90}},
+      // Clamped at the screen's bottom edge rather than leaving it.
+      {3, QStringLiteral("16:9"), {0, 510}, {400, 520}, {0, 510, 160, 90}},
+  };
+  for (const Case &test : cases) {
+    CaptureEditor editor(capture, CaptureEditor::CaptureMode::Region);
+    editor.setSuppressSnapshots(true);
+    editor.resize(800, 600);
+    editor.show();
+    QApplication::processEvents();
+    for (int tab = 0; tab < test.tabs; ++tab)
+      QTest::keyClick(&editor, Qt::Key_Tab);
+    if (editor.regionAspectLabelForTest() != test.label) {
+      error = QStringLiteral("%1 Tab presses gave aspect %2, expected %3")
+                  .arg(test.tabs)
+                  .arg(editor.regionAspectLabelForTest(), test.label);
+      return false;
+    }
+    const QRectF selection = drag(editor, test.from, test.to, false);
+    if (selection != test.expected) {
+      error = QStringLiteral("%1 drag selected %2,%3 %4x%5")
+                  .arg(test.label)
+                  .arg(selection.x())
+                  .arg(selection.y())
+                  .arg(selection.width())
+                  .arg(selection.height());
+      return false;
+    }
+    editor.close();
+  }
+
+  CaptureEditor editor(capture, CaptureEditor::CaptureMode::Region);
+  editor.setSuppressSnapshots(true);
+  editor.resize(800, 600);
+  editor.show();
+  QApplication::processEvents();
+  QTest::keyClick(&editor, Qt::Key_Tab, Qt::ShiftModifier);
+  if (editor.regionAspectLabelForTest() != QStringLiteral("16:9")) {
+    error = QStringLiteral("Shift+Tab did not cycle back to 16:9");
+    return false;
+  }
+  // Tab mid-drag wraps to free and reshapes the live frame at once.
+  if (drag(editor, {100, 100}, {300, 150}, true) != QRectF(100, 100, 200, 50)) {
+    error = QStringLiteral("Tab mid-drag did not reshape the live selection");
+    return false;
+  }
   editor.close();
   return true;
 }
@@ -1022,19 +1104,55 @@ bool runShortcutGuideSmoke(QApplication &application, QString &error) {
     }
     QTest::keyClick(&editor, Qt::Key_Question, Qt::ShiftModifier);
     application.processEvents();
-    if (guide->expanded() || guide->height() > 40) {
-      error = QStringLiteral("Question mark did not collapse the shortcut card");
+    if (guide->expanded() || guide->isVisible()) {
+      error = QStringLiteral("Question mark did not hide the shortcut card");
       return false;
     }
     const QImage collapsed = editor.grab().toImage();
     const QRect toolbar(0, 0, shown.width(), qRound(90 * shown.devicePixelRatio()));
     if (shown.copy(toolbar) != collapsed.copy(toolbar)) {
-      error = QStringLiteral("Collapsing the shortcut card changed the toolbar");
+      error = QStringLiteral("Hiding the shortcut card changed the toolbar");
       return false;
     }
-    QTest::mouseClick(guide, Qt::LeftButton, Qt::NoModifier, guide->rect().center());
-    if (!guide->expanded()) {
-      error = QStringLiteral("Shortcuts button did not reopen the card");
+    const QString hiddenMarker =
+        QDir(QStandardPaths::writableLocation(QStandardPaths::StateLocation))
+            .filePath(QStringLiteral("shortcuts-hidden"));
+    if (!QTest::qWaitFor([&] { return QFile::exists(hiddenMarker); })) {
+      error = QStringLiteral("Closing the shortcut card was not remembered");
+      return false;
+    }
+    {
+      CaptureEditor next(capture, mode);
+      next.setSuppressSnapshots(true);
+      next.resize(1200, 800);
+      next.show();
+      if (!QTest::qWaitForWindowExposed(&next)) {
+        error = QStringLiteral("Second shortcut guide window was not exposed");
+        return false;
+      }
+      auto *nextGuide = next.findChild<ShortcutGuide *>();
+      if (!nextGuide || nextGuide->expanded() || nextGuide->isVisible()) {
+        error = QStringLiteral("A closed shortcut card reopened on the next capture");
+        return false;
+      }
+      next.close();
+    }
+    QTest::keyClick(&editor, Qt::Key_Question, Qt::ShiftModifier);
+    if (!guide->expanded() || !QTest::qWaitFor([&] { return guide->isVisible(); }) ||
+        !QTest::qWaitFor([&] { return !QFile::exists(hiddenMarker); })) {
+      error = QStringLiteral("Question mark did not bring the shortcut card back");
+      return false;
+    }
+    QTest::mouseClick(guide, Qt::LeftButton, Qt::NoModifier,
+                      QPoint(guide->width() / 2, guide->height() - 18));
+    if (guide->expanded() || guide->isVisible()) {
+      error = QStringLiteral("Closing the Shortcuts header did not hide the card");
+      return false;
+    }
+    QTest::keyClick(&editor, Qt::Key_Question, Qt::ShiftModifier);
+    if (!QTest::qWaitFor([&] { return guide->isVisible(); }) ||
+        !QTest::qWaitFor([&] { return !QFile::exists(hiddenMarker); })) {
+      error = QStringLiteral("Question mark did not reopen a card closed from its header");
       return false;
     }
     if (mode == CaptureEditor::CaptureMode::File) {
@@ -2499,7 +2617,7 @@ bool runScrollScaleChecks(QString &error) {
   return true;
 }
 
-bool runPostCaptureChecks(QString &error) {
+bool runPostCaptureChecks(QString &error, bool autosave) {
   if (!runScrollScaleChecks(error))
     return false;
   QTemporaryDir directory;
@@ -2545,7 +2663,23 @@ bool runPostCaptureChecks(QString &error) {
   capture.windows = {{QRect(100, 100, 300, 200), QStringLiteral("window"),
                        QStringLiteral("fixture"), QStringLiteral("test")}};
 
+  const QByteArray oldConfigHome = qgetenv("XDG_CONFIG_HOME");
+  const QByteArray oldSaveDir = qgetenv("OMASNAP_SCREENSHOT_DIR");
+  const auto restoreAutosave = qScopeGuard([&] {
+    oldConfigHome.isNull() ? qunsetenv("XDG_CONFIG_HOME") : qputenv("XDG_CONFIG_HOME", oldConfigHome);
+    oldSaveDir.isNull() ? qunsetenv("OMASNAP_SCREENSHOT_DIR") : qputenv("OMASNAP_SCREENSHOT_DIR", oldSaveDir);
+  });
+  qputenv("OMASNAP_SCREENSHOT_DIR", directory.filePath(QStringLiteral("saved")).toUtf8());
   using Mode = CaptureEditor::CaptureMode;
+  qputenv("XDG_CONFIG_HOME", directory.path().toUtf8());
+  // The enabled case has no config: verify the actual built-in default.
+  if (!autosave) {
+    QDir().mkpath(QFileInfo(defaultConfigPath()).absolutePath());
+    QFile config(defaultConfigPath());
+    if (!config.open(QIODevice::WriteOnly) ||
+        config.write("[output]\nautosave = false\n") < 0)
+      return false;
+  }
   for (const Mode mode : {Mode::Region, Mode::Smart, Mode::Window,
                           Mode::Fullscreen, Mode::Scroll}) {
     CaptureEditor editor(capture, mode, QuickOutputMode::CopyAndPreview);
@@ -2632,6 +2766,11 @@ bool runPostCaptureChecks(QString &error) {
                   .arg(static_cast<int>(mode));
       return false;
     }
+    if (log.savedPath.isEmpty() == autosave ||
+        (autosave && QImage(log.savedPath).convertToFormat(expected.format()) != expected)) {
+      error = QStringLiteral("Autosave did not preserve the capture and preview's saved path");
+      return false;
+    }
     const auto recent = findRecentSnap(log.recentId);
     const auto listed = listRecentSnaps(false);
     if (!recent || listed.isEmpty() ||
@@ -2646,7 +2785,8 @@ bool runPostCaptureChecks(QString &error) {
       if (!preview.isLocked())
         return false;
     }
-    if (QFile::exists(pin) || !QFile::exists(recent->sourcePath)) {
+    if (QFile::exists(pin) || !QFile::exists(recent->sourcePath) ||
+        (autosave && !QFile::exists(log.savedPath))) {
       error = QStringLiteral("Preview expiry removed its recent capture");
       return false;
     }
@@ -2706,6 +2846,56 @@ bool runPostCaptureChecks(QString &error) {
         reopened.renderCurrentOutput() != next.renderCurrentOutput()) {
       error = QStringLiteral("The recent capture did not retain its editable annotation");
       return false;
+    }
+  }
+  // Under --notify, a saved capture is announced with Open and Edit
+  // buttons for the saved PNG instead of a timed preview, both fresh and
+  // when saved from the editor.
+  if (autosave) {
+    qputenv("OMASNAP_NOTIFY", "1");
+    const auto restoreNotify = qScopeGuard([] { qunsetenv("OMASNAP_NOTIFY"); });
+    // Keep the wording English whatever this desktop's language is.
+    if (!executable(QStringLiteral("omarchy-i18n"),
+                    QByteArrayLiteral("#!/bin/sh\nprintf '%s' \"$1\"\n")))
+      return false;
+    for (const bool fresh : {true, false}) {
+      CaptureEditor editor(capture, fresh ? Mode::Region : Mode::File,
+                           fresh ? QuickOutputMode::CopyAndPreview
+                                 : QuickOutputMode::None);
+      QString pin;
+      QStringList toast;
+      editor.setProcessLauncherForTest([&](const QString &program,
+                                           const QStringList &args) {
+        if (program == QStringLiteral("omarchy-notification-send"))
+          toast = args;
+        else
+          pin = args.last();
+        return true;
+      });
+      editor.resize(800, 600);
+      editor.show();
+      if (fresh) {
+        QTest::mousePress(&editor, Qt::LeftButton, Qt::NoModifier, {100, 100});
+        QTest::mouseMove(&editor, {400, 300});
+        QTest::mouseRelease(&editor, Qt::LeftButton, Qt::NoModifier, {400, 300});
+      }
+      const QImage expected = editor.renderCurrentOutput();
+      if (!fresh)
+        QTest::keyClick(&editor, Qt::Key_S, Qt::ControlModifier);
+      editor.waitForExport();
+      const QString saved = toast.isEmpty() ? QString() : toast.last();
+      const auto removeSaved = qScopeGuard([&] { QFile::remove(saved); });
+      // Edit reopens the capture's layers from the recent shelf.
+      const qsizetype recent = toast.indexOf(QStringLiteral("--recent"));
+      if (editor.isVisible() || !pin.isEmpty() ||
+          !toast.contains(QStringLiteral("Open")) || recent < 0 ||
+          !findRecentSnap(toast.value(recent + 1)) ||
+          QImage(saved).convertToFormat(expected.format()) != expected) {
+        error = QStringLiteral("--notify did not announce the saved %1 capture: %2")
+                    .arg(fresh ? QStringLiteral("fresh") : QStringLiteral("edited"),
+                         toast.join(QStringLiteral(" | ")));
+        return false;
+      }
     }
   }
   // Both picker shortcuts keep every capture kind in the editor without
@@ -2811,7 +3001,8 @@ bool runPostCaptureChecks(QString &error) {
     const QStringList saved = QDir(savedDirectory.path()).entryList(
         {QStringLiteral("*.png")}, QDir::Files);
     const bool shouldSave =
-        output == QuickOutputMode::Save || output == QuickOutputMode::Both;
+        output == QuickOutputMode::Save || output == QuickOutputMode::Both ||
+        (output == QuickOutputMode::CopyAndPreview && autosave);
     const QImage expectedClipboard =
         output == QuickOutputMode::Save ? clipboardBefore : expected;
     if (editor.isVisible() || editor.editingForTest() ||
@@ -3200,21 +3391,30 @@ bool runScreenshotFilenameChecks(QString &error) {
     QFile configFile(configPath);
     if (!configFile.open(QIODevice::WriteOnly | QIODevice::Text) ||
         configFile.write("[output]\ndirectory = ~/Captures\n"
-                         "filename = {date} {app}\n") < 0) {
+                         "filename = {date} {app}\nautosave = true\n") < 0) {
       error = QStringLiteral("Could not write filename-check config");
       return false;
     }
     configFile.close();
     const OutputConfig loaded = loadOutputConfig(configPath);
     if (loaded.directory != QDir::homePath() + QStringLiteral("/Captures") ||
-        loaded.filename != QStringLiteral("{date} {app}")) {
+        loaded.filename != QStringLiteral("{date} {app}") || !loaded.autosave) {
       error = QStringLiteral("loadOutputConfig read %1 / %2")
                   .arg(loaded.directory, loaded.filename);
       return false;
     }
+    if (!configFile.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+        configFile.write("[output]\nautosave = false\n") < 0)
+      return false;
+    configFile.close();
+    if (loadOutputConfig(configPath).autosave ||
+        !loadOutputConfig(directory.filePath(QStringLiteral("missing.conf"))).autosave) {
+      error = QStringLiteral("Autosave config did not override the built-in default");
+      return false;
+    }
     const OutputConfig defaults = loadOutputConfig(
         QDir(directory.path()).filePath(QStringLiteral("missing.conf")));
-    if (!defaults.directory.isEmpty() ||
+    if (!defaults.autosave || !defaults.directory.isEmpty() ||
         defaults.filename != QStringLiteral("screenshot-{date}_{time}-{app}")) {
       error = QStringLiteral("loadOutputConfig changed defaults for a missing file");
       return false;
@@ -5877,6 +6077,10 @@ bool runOpLogSmoke(QApplication &application, QString &error) {
     error = QStringLiteral("Redo did not replay the op log");
     return false;
   }
+  if (!editor.waitForSnapshot()) {
+    error = QStringLiteral("Redone op-log working document did not persist");
+    return false;
+  }
 
   QTemporaryDir directory;
   if (!directory.isValid()) {
@@ -6251,6 +6455,65 @@ bool runNotificationArgvCheck(QString &error) {
   const qsizetype image = saved.indexOf(QStringLiteral("--image"));
   if (image < 0 || saved.at(image + 1) != imagePath) {
     error = QStringLiteral("--image does not carry the saved path");
+    return false;
+  }
+  // Under --notify, Open and Edit are buttons that both receive the path
+  // through --with, which must therefore end the line as one word.
+  QTemporaryDir directory;
+  const QString shotPath = directory.filePath(QStringLiteral("it's a shot 1.png"));
+  QImage shot(1920, 1080, QImage::Format_RGB32);
+  shot.fill(Qt::darkCyan);
+  if (!directory.isValid() || !shot.save(shotPath))
+    return false;
+  const QStringList toast = captureNotificationArguments(
+      QStringLiteral("Screenshot saved"), shotPath, {}, true);
+  const qsizetype open = toast.indexOf(QStringLiteral("Open"));
+  const qsizetype edit = toast.indexOf(QStringLiteral("Edit"));
+  const qsizetype headline = toast.indexOf(QStringLiteral("Screenshot saved"));
+  if (toast.contains(QStringLiteral("--exec")) || open < 1 || edit < 1 ||
+      toast.at(open - 1) != QStringLiteral("--action") ||
+      toast.at(open + 1) != QStringLiteral("xdg-open") ||
+      toast.at(edit - 1) != QStringLiteral("--action") ||
+      !toast.at(edit + 1).endsWith(QStringLiteral("omasnap")) ||
+      toast.at(toast.indexOf(QStringLiteral("--image")) + 1) != shotPath ||
+      toast.at(toast.size() - 2) != QStringLiteral("--with") ||
+      toast.last() != shotPath ||
+      !toast.at(headline + 1).startsWith(QLocale().toString(1920) +
+                                         QStringLiteral(" × ") +
+                                         QLocale().toString(1080))) {
+    error = QStringLiteral("--notify toast argv is wrong: %1")
+                .arg(toast.join(QStringLiteral(" | ")));
+    return false;
+  }
+  // Under --notify the wording comes from Omarchy's catalog, and an entry
+  // Omarchy lacks (omarchy-i18n echoes its key) stays English.
+  QFile i18n(directory.filePath(QStringLiteral("omarchy-i18n")));
+  if (!i18n.open(QIODevice::WriteOnly) ||
+      i18n.write("#!/bin/sh\ncase \"$1\" in\n"
+                 "  capture.screenshotSaved) printf 'Sk\303\246rmbillede gemt' ;;\n"
+                 "  capture.screenshotOpen) printf '\303\205bn' ;;\n"
+                 "  *) printf '%s' \"$1\" ;;\nesac\n") < 0 ||
+      !i18n.setPermissions(QFileDevice::ReadOwner | QFileDevice::ExeOwner))
+    return false;
+  i18n.close();
+  const QByteArray oldPath = qgetenv("PATH");
+  const auto restore = qScopeGuard([&] {
+    qputenv("PATH", oldPath);
+    qunsetenv("OMASNAP_NOTIFY");
+  });
+  qputenv("PATH", directory.path().toUtf8() + ':' + oldPath);
+  qputenv("OMASNAP_NOTIFY", "1");
+  QStringList worded;
+  sendCaptureNotification(QStringLiteral("Screenshot saved"), shotPath, {},
+                          [&](const QString &, const QStringList &args) {
+                            worded = args;
+                            return true;
+                          });
+  if (!worded.contains(QStringLiteral("Skærmbillede gemt")) ||
+      !worded.contains(QStringLiteral("Åbn")) ||
+      !worded.contains(QStringLiteral("Edit"))) {
+    error = QStringLiteral("--notify toast did not use Omarchy's wording: %1")
+                .arg(worded.join(QStringLiteral(" | ")));
     return false;
   }
   sendCaptureNotification(QStringLiteral("smoke"));
@@ -12149,8 +12412,17 @@ bool runArrowStyleSmoke(QApplication &application, QString &error) {
 
 
 int main(int argc, char **argv) {
-  if (qEnvironmentVariableIsSet(kPinSmokeEditorChild))
-    return 0;
+  if (qEnvironmentVariableIsSet(kPinSmokeEditorChild)) {
+    QSaveFile arguments(qEnvironmentVariable(kPinSmokeEditorChild));
+    if (!arguments.open(QIODevice::WriteOnly))
+      return 1;
+    for (int i = 1; i < argc; ++i) {
+      const QByteArray argument = QByteArray(argv[i]) + '\0';
+      if (arguments.write(argument) != argument.size())
+        return 1;
+    }
+    return arguments.commit() ? 0 : 1;
+  }
   // Re-executed by the instance-lock checks as the process holding the lock.
   const QString heldLockPath =
       qEnvironmentVariable(kInstanceLockHolderVariable);
@@ -12158,6 +12430,33 @@ int main(int argc, char **argv) {
     return runInstanceLockHolder(heldLockPath);
 
   QApplication application(argc, argv);
+  QCommandLineParser parser;
+  parser.setApplicationDescription(QStringLiteral("Omasnap headless smoke checks"));
+  parser.addHelpOption();
+  const QCommandLineOption outputDirectoryOption(
+      QStringLiteral("output-dir"),
+      QStringLiteral("Write test artifacts here (default: smoke-output beside the executable)."),
+      QStringLiteral("directory"));
+  const QCommandLineOption outputChecksOption(
+      QStringLiteral("output-checks"), QStringLiteral("Run only output checks."));
+  parser.addOption(outputDirectoryOption);
+  parser.addOption(outputChecksOption);
+  parser.process(application);
+  if (!parser.positionalArguments().isEmpty()) {
+    qCritical("Unexpected positional argument; use --output-dir <directory>.");
+    return EXIT_FAILURE;
+  }
+  const QString outputDirectory =
+      parser.isSet(outputDirectoryOption)
+          ? parser.value(outputDirectoryOption)
+          : QDir(QCoreApplication::applicationDirPath())
+                .filePath(QStringLiteral("smoke-output"));
+  if (outputDirectory.isEmpty() || !QDir().mkpath(outputDirectory)) {
+    qCritical().noquote() << "Could not create smoke output directory:" << outputDirectory;
+    return EXIT_FAILURE;
+  }
+  const QString outputRoot =
+      QDir(outputDirectory).absoluteFilePath(QStringLiteral("capture"));
   QApplication::setFont(chromeDefaultFont()); // as main() does
   if (!loadCaptureFonts())
     return 17;
@@ -12168,6 +12467,25 @@ int main(int argc, char **argv) {
   if (!smokeShelf.isValid())
     return 18;
   qputenv("OMASNAP_RECENT_DIR", smokeShelf.path().toUtf8());
+  // Remembered UI state, such as a closed shortcuts card, stays out of the
+  // developer's own.
+  QTemporaryDir smokeState;
+  if (!smokeState.isValid())
+    return 18;
+  qputenv("XDG_STATE_HOME", smokeState.path().toUtf8());
+  // Outputs notify through omarchy-notification-send. Answer those with a
+  // no-op so a run on a desktop does not post notifications for temporary
+  // PNGs that are gone before the daemon loads them.
+  QTemporaryDir quietCommands;
+  QFile notifier(QDir(quietCommands.path())
+                     .filePath(QStringLiteral("omarchy-notification-send")));
+  if (!quietCommands.isValid() || !notifier.open(QIODevice::WriteOnly) ||
+      notifier.write("#!/bin/sh\n") < 0 ||
+      !notifier.setPermissions(QFileDevice::ReadOwner |
+                               QFileDevice::ExeOwner))
+    return 226;
+  notifier.close();
+  qputenv("PATH", quietCommands.path().toUtf8() + ':' + qgetenv("PATH"));
 
   // Live output capture against a real compositor (the smoke's own Wayland
   // connection; Qt's platform does not matter): open a session on the named
@@ -12201,15 +12519,21 @@ int main(int argc, char **argv) {
                                .arg(frame.height())
                                .arg(stopwatch.elapsed());
     }
-    const QString liveRoot =
-        argc > 1 ? QString::fromLocal8Bit(argv[1])
-                 : QDir(QDir::tempPath())
-                       .filePath(QStringLiteral("omasnap-native-smoke"));
-    if (!frame.save(liveRoot + QStringLiteral("-native-output.png"), "PNG"))
+    if (!frame.save(outputRoot + QStringLiteral("-native-output.png"), "PNG"))
       return 105;
     return 0;
   }
   QString snapshotError;
+  if (parser.isSet(outputChecksOption)) {
+    if (!runQuickOutputChecks(snapshotError) ||
+        !runPostCaptureChecks(snapshotError, false) ||
+        !runPostCaptureChecks(snapshotError, true) ||
+        !runScreenshotFilenameChecks(snapshotError)) {
+      qWarning().noquote() << snapshotError;
+      return 1;
+    }
+    return 0;
+  }
   if (!runShortcutGuideSmoke(application, snapshotError)) {
     qWarning().noquote() << snapshotError;
     return 216;
@@ -12273,6 +12597,10 @@ int main(int argc, char **argv) {
     qWarning().noquote() << snapshotError;
     return 95;
   }
+  if (!runRegionAspectCheck(snapshotError)) {
+    qWarning().noquote() << snapshotError;
+    return 225;
+  }
   if (!runSmartSelectionSmoke(application, snapshotError)) {
     qWarning().noquote() << snapshotError;
     return 136;
@@ -12313,7 +12641,8 @@ int main(int argc, char **argv) {
     qWarning().noquote() << snapshotError;
     return 73;
   }
-  if (!runPostCaptureChecks(snapshotError)) {
+  if (!runPostCaptureChecks(snapshotError, false) ||
+        !runPostCaptureChecks(snapshotError, true)) {
     qWarning().noquote() << snapshotError;
     return 137;
   }
@@ -12729,10 +13058,6 @@ int main(int argc, char **argv) {
     qWarning().noquote() << snapshotError;
     return 125;
   }
-  const QString outputRoot =
-      argc > 1 ? QString::fromLocal8Bit(argv[1])
-               : QDir(QDir::tempPath())
-                     .filePath(QStringLiteral("omasnap-native-smoke"));
   if (!runBackdropPreviewMatchesExport(application, outputRoot, snapshotError)) {
     qWarning().noquote() << snapshotError;
     return 214;
@@ -12743,7 +13068,7 @@ int main(int argc, char **argv) {
   }
   const QString snapshotPath = temporarySnapshotPath();
   QFile::remove(snapshotPath);
-  const QString savedRoot = QDir(outputRoot).filePath(QStringLiteral("saved"));
+  const QString savedRoot = QDir(outputDirectory).absoluteFilePath(QStringLiteral("saved"));
   QDir(savedRoot).removeRecursively();
   qputenv("OMASNAP_SCREENSHOT_DIR", savedRoot.toUtf8());
 
@@ -13726,6 +14051,44 @@ int main(int argc, char **argv) {
     qputenv("OMARCHY_OCR_LANGS", savedOmarchyLangs);
   if (!fallbackOcr.contains(QStringLiteral("OCR smoke test 42")))
     return 65;
+  // Tesseract's OpenMP pool spins on every core for no gain on a screenshot:
+  // a single thread reads the same text faster. Put a wrapper ahead of the
+  // real tesseract on PATH that records OMP_THREAD_LIMIT, then runs it.
+  {
+    const QString realTesseract =
+        QStandardPaths::findExecutable(QStringLiteral("tesseract"));
+    const QTemporaryDir wrapperDirectory;
+    if (realTesseract.isEmpty() || !wrapperDirectory.isValid())
+      return 231;
+    const QString recorded =
+        wrapperDirectory.filePath(QStringLiteral("omp-thread-limit"));
+    QFile wrapper(wrapperDirectory.filePath(QStringLiteral("tesseract")));
+    if (!wrapper.open(QIODevice::WriteOnly) ||
+        wrapper.write(QStringLiteral("#!/bin/sh\n"
+                                     "printf '%s' \"${OMP_THREAD_LIMIT-unset}\" > '%1'\n"
+                                     "exec '%2' \"$@\"\n")
+                          .arg(recorded, realTesseract)
+                          .toUtf8()) < 0 ||
+        !wrapper.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                                QFileDevice::ExeOwner))
+      return 231;
+    wrapper.close();
+    const QByteArray savedPath = qgetenv("PATH");
+    qputenv("PATH", QFile::encodeName(wrapperDirectory.path()) + ':' + savedPath);
+    const QString wrappedOcr = recognizeText(ocrImage, ocrError);
+    qputenv("PATH", savedPath);
+    QFile recordedLimit(recorded);
+    const QByteArray threadLimit =
+        recordedLimit.open(QIODevice::ReadOnly) ? recordedLimit.readAll()
+                                                : QByteArrayLiteral("not run");
+    if (!wrappedOcr.contains(QStringLiteral("OCR smoke test 42")) ||
+        threadLimit != "1") {
+      qWarning().noquote()
+          << QStringLiteral("OCR ran tesseract with OMP_THREAD_LIMIT=%1, not 1")
+                 .arg(QString::fromUtf8(threadLimit));
+      return 231;
+    }
+  }
   QTest::mouseMove(&editor, QPoint(400, 312), 20);
   QTest::keyClick(&editor, Qt::Key_T);
   QTest::keyClick(&editor, Qt::Key_Escape);
@@ -13756,11 +14119,11 @@ int main(int argc, char **argv) {
     QTest::keyClick(&finishEditor, Qt::Key_S, Qt::ControlModifier);
     finishEditor.waitForExport();
     const QStringList savedFiles =
-        QDir(QDir(outputRoot).filePath(QStringLiteral("saved")))
+        QDir(QDir(outputDirectory).absoluteFilePath(QStringLiteral("saved")))
             .entryList({QStringLiteral("*.png")}, QDir::Files);
     if (finishEditor.isVisible() || savedFiles.size() != 1)
       return 60;
-    savedPath = QDir(QDir(outputRoot).filePath(QStringLiteral("saved")))
+    savedPath = QDir(QDir(outputDirectory).absoluteFilePath(QStringLiteral("saved")))
                     .filePath(savedFiles.constFirst());
     if (QImage(savedPath).convertToFormat(QImage::Format_ARGB32) !=
             snapshotBeforeSave ||
