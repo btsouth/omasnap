@@ -341,6 +341,9 @@ public:
   void moveToMonitorForTest(CaptureData capture) {
     moveToMonitor(std::move(capture));
   }
+  /// Adds `capture`'s veil without mapping it on a layer surface, wired to
+  /// hand the overlay over as a mapped one does. Test hook.
+  MonitorVeil *addMonitorVeilForTest(CaptureData capture);
   /// Monitor the frozen frame being selected from belongs to. Test accessor.
   [[nodiscard]] QString monitorNameForTest() const {
     return capture_.monitor.name;
@@ -596,13 +599,14 @@ private:
   /// Freezes every other monitor behind a veil on a worker once the overlay
   /// is up, so a selection can start on whichever screen the pointer is on.
   void offerOtherMonitors();
+  [[nodiscard]] MonitorVeil *newMonitorVeil(CaptureData capture);
   void presentMonitorVeil(CaptureData capture);
   [[nodiscard]] const MonitorVeil *monitorVeil(const QString &name) const;
   /// The veil whose monitor holds `point`, in this overlay's coordinates.
   [[nodiscard]] const MonitorVeil *monitorVeilAt(const QPointF &point) const;
   /// The pointer reached monitor `name`: move the overlay there, once the
   /// monitor being left shows its own veil.
-  void followPointerTo(const QString &name);
+  void followPointerTo(QString name);
   void moveToMonitor(CaptureData capture);
   /// Selection is over: every other monitor goes live again.
   void releaseMonitorVeils();

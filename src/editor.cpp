@@ -6963,7 +6963,7 @@ void CaptureEditor::offerOtherMonitors() {
       }));
 }
 
-void CaptureEditor::presentMonitorVeil(CaptureData capture) {
+MonitorVeil *CaptureEditor::newMonitorVeil(CaptureData capture) {
   auto *veil = new MonitorVeil(std::move(capture),
                                chromeAlpha(chromeTheme().scrim, kBackdropDim));
   // Queued: the frame reaches the compositor after paintEvent returns.
@@ -6974,6 +6974,17 @@ void CaptureEditor::presentMonitorVeil(CaptureData capture) {
           followPointerTo(pendingMonitor_);
       },
       Qt::QueuedConnection);
+  return veil;
+}
+
+MonitorVeil *CaptureEditor::addMonitorVeilForTest(CaptureData capture) {
+  MonitorVeil *veil = newMonitorVeil(std::move(capture));
+  veils_.push_back(veil);
+  return veil;
+}
+
+void CaptureEditor::presentMonitorVeil(CaptureData capture) {
+  MonitorVeil *veil = newMonitorVeil(std::move(capture));
   if (!veil->present()) {
     delete veil;
     return;
@@ -6998,7 +7009,8 @@ const MonitorVeil *CaptureEditor::monitorVeilAt(const QPointF &point) const {
   return nullptr;
 }
 
-void CaptureEditor::followPointerTo(const QString &name) {
+// By value: the deferred call passes pendingMonitor_ itself, cleared here.
+void CaptureEditor::followPointerTo(QString name) {
   pendingMonitor_.clear();
   // A drag, a capture in flight, or anything but the frozen screen stays on
   // the monitor it began on.
@@ -7013,7 +7025,7 @@ void CaptureEditor::followPointerTo(const QString &name) {
   // desktop flashes there between the overlay unmapping and a veil mapping.
   const MonitorVeil *left = monitorVeil(capture_.monitor.name);
   if (!left || !left->painted()) {
-    pendingMonitor_ = name;
+    pendingMonitor_ = std::move(name);
     if (!left)
       presentMonitorVeil(capture_);
     return;

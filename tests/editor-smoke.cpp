@@ -30,6 +30,7 @@
 #include "pin-interaction-smoke.hpp"
 #include "pin-file.hpp"
 #include "overlay-dismissal.hpp"
+#include "overlay-layer.hpp"
 #include "text-band.hpp"
 #include "transform-smoke.hpp"
 #include "eyedropper.hpp"
@@ -789,6 +790,59 @@ bool runMonitorMoveSmoke(QApplication &application, QString &error) {
       editor.currentSelection() != QRectF(secondWindow)) {
     error = QStringLiteral(
         "Smart click after moving monitors missed the new monitor's window");
+    return false;
+  }
+  editor.close();
+  return true;
+}
+
+/** Checks the move that waits for the monitor being left to paint its veil:
+ *  once it has, the overlay must still go where the pointer went. */
+bool runDeferredMonitorMoveSmoke(QApplication &application, QString &error) {
+  const auto monitor = [](const QString &name, QRect geometry, QColor fill) {
+    CaptureData capture;
+    capture.monitor.name = name;
+    capture.monitor.geometry = geometry;
+    capture.monitor.pixelSize = geometry.size();
+    capture.source = QImage(geometry.size(), QImage::Format_ARGB32_Premultiplied);
+    capture.source.fill(fill);
+    capture.previewSize = capture.source.size();
+    return capture;
+  };
+  const CaptureData first = monitor(QStringLiteral("TEST"),
+                                    QRect(0, 0, 800, 600), QColor(64, 96, 128));
+  const CaptureData second = monitor(
+      QStringLiteral("TEST-2"), QRect(800, 0, 400, 300), QColor(128, 96, 64));
+
+  CaptureEditor editor(first, CaptureEditor::CaptureMode::Region);
+  editor.setSuppressSnapshots(true);
+  editor.resize(800, 600);
+  editor.show();
+  application.processEvents();
+  MonitorVeil *left = editor.addMonitorVeilForTest(first);
+  editor.addMonitorVeilForTest(second);
+  // The pointer crosses onto TEST-2 before TEST's veil has painted.
+  QMouseEvent crossing(QEvent::MouseMove, QPointF(900, 100), QPointF(900, 100),
+                       Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+  QApplication::sendEvent(&editor, &crossing);
+  application.processEvents();
+  if (editor.monitorNameForTest() != first.monitor.name) {
+    error = QStringLiteral(
+        "The overlay left its monitor before that monitor's veil painted");
+    return false;
+  }
+  left->show();
+  if (!QTest::qWaitFor([&] { return left->painted(); }, 2000)) {
+    error = QStringLiteral("The veil of the monitor being left never painted");
+    return false;
+  }
+  QTest::qWait(50);
+  if (editor.monitorNameForTest() != second.monitor.name ||
+      !editor.selectingForTest()) {
+    error = QStringLiteral("Once the monitor being left painted its veil, the "
+                           "overlay stayed there instead of following the "
+                           "pointer to %1")
+                .arg(second.monitor.name);
     return false;
   }
   editor.close();
@@ -12608,6 +12662,10 @@ int main(int argc, char **argv) {
   if (!runMonitorMoveSmoke(application, snapshotError)) {
     qWarning().noquote() << snapshotError;
     return 225;
+  }
+  if (!runDeferredMonitorMoveSmoke(application, snapshotError)) {
+    qWarning().noquote() << snapshotError;
+    return 233;
   }
   if (!runPointerDamageRegionCheck(snapshotError)) {
     qWarning().noquote() << snapshotError;
