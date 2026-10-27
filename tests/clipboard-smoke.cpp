@@ -168,6 +168,7 @@ bool runClipboardSizeLimitSmoke(QString &error) {
       "set -euo pipefail\n"
       "if [[ \"${1:-}\" == \"--list-types\" ]]; then\n"
       "  printf 'image/png\\n'\n"
+      "  [[ -z \"${OMASNAP_TEST_CLIPBOARD_BMP:-}\" ]] || printf 'image/bmp\\n'\n"
       "  exit 0\n"
       "fi\n"
       "if [[ \"${1:-}\" == \"--no-newline\" && \"${2:-}\" == \"--type\" "
@@ -175,6 +176,10 @@ bool runClipboardSizeLimitSmoke(QString &error) {
       "  printf '\\x89PNG\\r\\n\\x1a\\n'\n"
       "  head -c 4194304 /dev/zero\n"
       "  : > \"$OMASNAP_TEST_CLIPBOARD_SERVED\"\n"
+      "  exit 0\n"
+      "fi\n"
+      "if [[ \"${3:-}\" == \"image/bmp\" ]]; then\n"
+      "  cat \"$OMASNAP_TEST_CLIPBOARD_BMP\"\n"
       "  exit 0\n"
       "fi\n"
       "exit 1\n");
@@ -188,6 +193,7 @@ bool runClipboardSizeLimitSmoke(QString &error) {
   const auto restoreEnvironment = qScopeGuard([oldPath] {
     qputenv("PATH", oldPath);
     qunsetenv("OMASNAP_TEST_CLIPBOARD_SERVED");
+    qunsetenv("OMASNAP_TEST_CLIPBOARD_BMP");
   });
   qputenv("PATH", directory.path().toUtf8() + ':' + oldPath);
   qputenv("OMASNAP_TEST_CLIPBOARD_SERVED", QFile::encodeName(served));
@@ -207,6 +213,25 @@ bool runClipboardSizeLimitSmoke(QString &error) {
                      QFile::exists(served) ? QStringLiteral("yes")
                                            : QStringLiteral("no"),
                      clipboardError);
+    return false;
+  }
+
+  // An oversized format is skipped, not fatal: a smaller one offered beside
+  // it still opens.
+  const QString bmp =
+      QDir(directory.path()).filePath(QStringLiteral("small.bmp"));
+  QImage small(3, 2, QImage::Format_RGB32);
+  small.fill(Qt::blue);
+  if (!small.save(bmp, "BMP")) {
+    error = QStringLiteral("Could not write the fallback clipboard image");
+    return false;
+  }
+  qputenv("OMASNAP_TEST_CLIPBOARD_BMP", QFile::encodeName(bmp));
+  if (!loadClipboardImage(image, clipboardError, kTestLimitBytes) ||
+      image.size() != QSize(3, 2)) {
+    error = QStringLiteral("An oversized clipboard format stopped a smaller "
+                           "one from opening (error: %1)")
+                .arg(clipboardError);
     return false;
   }
   return true;

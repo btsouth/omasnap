@@ -1664,18 +1664,18 @@ bool loadClipboardImage(QImage &image, QString &error, qint64 maxImageBytes) {
   }
 
   bool receivedImageData = false;
+  bool refusedTooLarge = false;
   QString readError;
   for (const QString &mimeType : imageTypes) {
     // The clipboard owner decides how much wl-paste delivers; stop reading
-    // at the limit instead of holding the whole stream before refusing it.
+    // at the limit and try the next, perhaps smaller, offered format.
     const ProcessResult pasted = runProcess(
         QStringLiteral("wl-paste"),
         {QStringLiteral("--no-newline"), QStringLiteral("--type"), mimeType},
         {}, 5000, {}, maxImageBytes);
     if (pasted.outputTooLarge) {
-      error = QStringLiteral("Clipboard image is too large to open (over %1 MiB)")
-                  .arg(maxImageBytes >> 20);
-      return false;
+      refusedTooLarge = true;
+      continue;
     }
     if (!pasted.finished || pasted.exitCode != 0) {
       const QString detail = QString::fromUtf8(pasted.error).trimmed();
@@ -1689,6 +1689,11 @@ bool loadClipboardImage(QImage &image, QString &error, qint64 maxImageBytes) {
       return true;
   }
 
+  if (refusedTooLarge) {
+    error = QStringLiteral("Clipboard image is too large to open (over %1 MiB)")
+                .arg(maxImageBytes >> 20);
+    return false;
+  }
   if (!receivedImageData) {
     error = readError.isEmpty()
                 ? QStringLiteral("Could not read clipboard image")

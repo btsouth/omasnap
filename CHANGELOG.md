@@ -7,8 +7,9 @@ earlier development is recorded in the [commit history](https://github.com/omaco
 
 ### Fixed
 
-- `--clipboard` stops reading at 256 MiB and refuses the image, instead of
-  holding however much the clipboard owner sends in memory before deciding.
+- `--clipboard` stops reading an image format at 256 MiB and tries the next
+  one offered, refusing the image only when none fits, instead of holding
+  however much the clipboard owner sends in memory before deciding.
 
 ## 1.24.0
 
