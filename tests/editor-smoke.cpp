@@ -13094,23 +13094,23 @@ int main(int argc, char **argv) {
   }
   if (!runMonitorMoveSmoke(application, snapshotError)) {
     qWarning().noquote() << snapshotError;
-    return 225;
+    return 238;
   }
   if (!runDeferredMonitorMoveSmoke(application, snapshotError)) {
     qWarning().noquote() << snapshotError;
-    return 233;
+    return 239;
   }
   if (!runEarlyMonitorCrossingSmoke(application, snapshotError)) {
     qWarning().noquote() << snapshotError;
-    return 234;
+    return 240;
   }
   if (!runDragHeldMonitorMoveSmoke(application, snapshotError)) {
     qWarning().noquote() << snapshotError;
-    return 235;
+    return 241;
   }
   if (!runCrossingThenLateVeilSmoke(application, snapshotError)) {
     qWarning().noquote() << snapshotError;
-    return 237;
+    return 242;
   }
   if (!runPointerDamageRegionCheck(snapshotError)) {
     qWarning().noquote() << snapshotError;
