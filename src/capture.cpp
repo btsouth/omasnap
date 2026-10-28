@@ -1439,9 +1439,26 @@ QImage renderCapture(const CaptureData &capture, const QRectF &selection,
       capture.source.width() / static_cast<qreal>(capture.previewSize.width());
   const qreal sourceScaleY =
       capture.source.height() / static_cast<qreal>(capture.previewSize.height());
-  // A document already has its final pixels. Its integer logical size can
-  // round at fractional scales; do not resize the image to undo that rounding.
-  const bool highDpi = capture.monitor.scale > 1.0 && !capture.preserveSourceResolution;
+  // Loaded documents keep their own density; fresh buffers may differ by
+  // one pixel because the monitor's logical dimensions are rounded.
+  const bool highDpi =
+      capture.monitor.scale > 1.0 && !capture.preserveSourceResolution;
+  const QSize nativeSize(
+      qRound(capture.previewSize.width() * capture.monitor.scale),
+      qRound(capture.previewSize.height() * capture.monitor.scale));
+  const bool nativeDensity =
+      !highDpi ||
+      (std::abs(capture.source.width() - nativeSize.width()) <= 1 &&
+       std::abs(capture.source.height() - nativeSize.height()) <= 1);
+  // Keep an unedited native crop intact instead of resampling its rounded
+  // edges. Other source densities retain the existing normalization path.
+  if (nativeDensity && annotations.isEmpty() &&
+      (backgroundStyle == BackgroundStyle::None ||
+       backgroundStyle == BackgroundStyle::Off)) {
+    setPngLogicalSize(cropped,
+                      renderedCaptureLogicalSize(capture, cropped.size()));
+    return cropped;
+  }
   const QSizeF outputScale = captureOutputScale(capture);
   const qreal scaleX = outputScale.width();
   const qreal scaleY = outputScale.height();
@@ -2595,7 +2612,10 @@ bool saveOperationLog(const QString &path, const OperationLog &log,
   return true;
 }
 
-bool loadOperationLog(const QString &path, OperationLog &log, QString &error) {
+bool loadOperationLog(const QString &path, OperationLog &log, QString &error,
+                      bool *notOperationLog) {
+  if (notOperationLog)
+    *notOperationLog = false;
   QFile file(path);
   if (!file.open(QIODevice::ReadOnly)) {
     error = QStringLiteral("Could not read operation log: %1").arg(path);
@@ -2606,11 +2626,21 @@ bool loadOperationLog(const QString &path, OperationLog &log, QString &error) {
   if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
     error = QStringLiteral("Could not parse operation log: %1")
                 .arg(parseError.errorString());
+    // Well-formed JSON that is not an object is another program's; text that
+    // does not parse may be omasnap's own log, cut short.
+    if (notOperationLog)
+      *notOperationLog = parseError.error == QJsonParseError::NoError;
     return false;
   }
   const QJsonObject root = document.object();
-  if (root.value(QStringLiteral("version")).toInt() != 1) {
+  if (root.value(QStringLiteral("version")).toInt() != 1 ||
+      !root.value(QStringLiteral("ops")).isArray()) {
     error = QStringLiteral("Unsupported operation log version");
+    // Every log omasnap writes has a numeric version and an ops array; an
+    // object without both is some other program's JSON sharing the name.
+    if (notOperationLog)
+      *notOperationLog = !root.value(QStringLiteral("version")).isDouble() ||
+                         !root.value(QStringLiteral("ops")).isArray();
     return false;
   }
   OperationLog loaded;
@@ -2636,6 +2666,30 @@ bool loadOperationLog(const QString &path, OperationLog &log, QString &error) {
   }
   loaded.index = std::clamp(loaded.index, 0, static_cast<int>(loaded.ops.size()));
   log = std::move(loaded);
+  return true;
+}
+
+bool loadSidecarOperationLog(const QString &imagePath, OperationLog &log,
+                             QString &error) {
+  const QString sidecar = operationLogPath(imagePath);
+  if (!QFile::exists(sidecar))
+    return true;
+  // The sidecar is only a naming convention: report.png opened from a
+  // download folder can sit beside another program's report.json. That file
+  // is not this image's edit history, so open the image plain instead of
+  // refusing it. A damaged omasnap log is still an error.
+  bool notOperationLog = false;
+  OperationLog loaded;
+  if (loadOperationLog(sidecar, loaded, error, &notOperationLog)) {
+    log = std::move(loaded);
+    return true;
+  }
+  if (!notOperationLog)
+    return false;
+  qWarning().noquote() << QStringLiteral("Ignoring %1: not an omasnap "
+                                         "operation log")
+                              .arg(sidecar);
+  error.clear();
   return true;
 }
 
@@ -2799,9 +2853,9 @@ void describeFileCapture(CaptureData &capture, QImage image,
   QSize logicalSize = pngLogicalSize(image);
   // Editable documents take precedence: their operations use the source
   // canvas's coordinates, whereas a PNG tag describes its flattened pixels.
-  if (log.previewSize.isValid() && !log.previewSize.isEmpty() &&
-      log.previewSize.width() <= image.width() &&
-      log.previewSize.height() <= image.height()) {
+  // Both obey the same scale bound.
+  if (log.previewSize.isValid() &&
+      logicalScaleAllowed(image.size(), log.previewSize)) {
     logicalSize = log.previewSize;
   }
   if (!logicalSize.isEmpty()) {
