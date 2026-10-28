@@ -1405,9 +1405,26 @@ QImage renderCapture(const CaptureData &capture, const QRectF &selection,
       capture.source.width() / static_cast<qreal>(capture.previewSize.width());
   const qreal sourceScaleY =
       capture.source.height() / static_cast<qreal>(capture.previewSize.height());
-  // A document already has its final pixels. Its integer logical size can
-  // round at fractional scales; do not resize the image to undo that rounding.
-  const bool highDpi = capture.monitor.scale > 1.0 && !capture.preserveSourceResolution;
+  // Loaded documents keep their own density; fresh buffers may differ by
+  // one pixel because the monitor's logical dimensions are rounded.
+  const bool highDpi =
+      capture.monitor.scale > 1.0 && !capture.preserveSourceResolution;
+  const QSize nativeSize(
+      qRound(capture.previewSize.width() * capture.monitor.scale),
+      qRound(capture.previewSize.height() * capture.monitor.scale));
+  const bool nativeDensity =
+      !highDpi ||
+      (std::abs(capture.source.width() - nativeSize.width()) <= 1 &&
+       std::abs(capture.source.height() - nativeSize.height()) <= 1);
+  // Keep an unedited native crop intact instead of resampling its rounded
+  // edges. Other source densities retain the existing normalization path.
+  if (nativeDensity && annotations.isEmpty() &&
+      (backgroundStyle == BackgroundStyle::None ||
+       backgroundStyle == BackgroundStyle::Off)) {
+    setPngLogicalSize(cropped,
+                      renderedCaptureLogicalSize(capture, cropped.size()));
+    return cropped;
+  }
   const QSizeF outputScale = captureOutputScale(capture);
   const qreal scaleX = outputScale.width();
   const qreal scaleY = outputScale.height();

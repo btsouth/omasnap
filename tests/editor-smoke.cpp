@@ -29,6 +29,7 @@
 #include "pin-lifecycle-smoke.hpp"
 #include "pin-interaction-smoke.hpp"
 #include "pin-file.hpp"
+#include "png.hpp"
 #include "overlay-dismissal.hpp"
 #include "text-band.hpp"
 #include "transform-smoke.hpp"
@@ -12508,6 +12509,64 @@ bool runArrowStyleSmoke(QApplication &application, QString &error) {
 }
 
 
+/** Unedited native exports retain their pixels through PNG output. */
+bool runNativeExportCheck(QString &error) {
+  // An unedited fractional-scale export must be the native pixels the
+  // selection covers, bit for bit, including after a PNG round trip.
+  QImage checker(1920, 1200, QImage::Format_RGB32);
+  for (int y = 0; y < checker.height(); ++y) {
+    auto *line = reinterpret_cast<QRgb *>(checker.scanLine(y));
+    for (int x = 0; x < checker.width(); ++x)
+      line[x] = (x + y) % 2 ? qRgb(255, 255, 255) : qRgb(0, 0, 0);
+  }
+  CaptureData fractional;
+  fractional.monitor.scale = 4.0 / 3.0;
+  fractional.monitor.pixelSize = checker.size();
+  fractional.source = checker;
+  fractional.previewSize = {1440, 900};
+  CaptureData rounded = fractional;
+  rounded.monitor.scale = 1.5;
+  rounded.previewSize = {1707, 100};
+  rounded.source = QImage(2560, 150, QImage::Format_RGB32);
+  rounded.source.fill(Qt::black);
+  rounded.source.setPixelColor(1279, 50, Qt::white);
+  rounded.monitor.pixelSize = rounded.source.size();
+  const struct {
+    const CaptureData *capture;
+    QRectF selection;
+    QRect pixels;
+    QSize logical;
+  } cases[] = {
+      {&fractional, QRectF(1, 1, 81, 81), QRect(1, 1, 109, 109), {82, 82}},
+      {&fractional, QRectF(3, 6, 300, 150), QRect(4, 8, 400, 200), {300, 150}},
+      {&fractional, QRectF(0, 0, 1440, 900), QRect(0, 0, 1920, 1200),
+       {1440, 900}},
+      {&rounded, QRectF(0, 0, 1707, 100), QRect(0, 0, 2560, 150), {1707, 100}},
+  };
+  for (const auto &item : cases) {
+    for (const BackgroundStyle style :
+         {BackgroundStyle::None, BackgroundStyle::Off}) {
+      const QImage exported =
+          renderCapture(*item.capture, item.selection, {}, style);
+      const QImage expected = item.capture->source.copy(item.pixels)
+                                  .convertToFormat(QImage::Format_ARGB32);
+      QByteArray bytes;
+      QBuffer buffer(&bytes);
+      const bool encoded =
+          buffer.open(QIODevice::WriteOnly) && writePng(exported, buffer);
+      const QImage decoded = QImage::fromData(bytes, "PNG");
+      if (exported.convertToFormat(QImage::Format_ARGB32) != expected ||
+          pngLogicalSize(exported) != item.logical || !encoded ||
+          decoded.convertToFormat(QImage::Format_ARGB32) != expected ||
+          pngLogicalSize(decoded) != item.logical) {
+        error = QStringLiteral("Unedited export changed native pixels or logical size");
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 int main(int argc, char **argv) {
   if (qEnvironmentVariableIsSet(kPinSmokeEditorChild)) {
     QSaveFile arguments(qEnvironmentVariable(kPinSmokeEditorChild));
@@ -12621,6 +12680,10 @@ int main(int argc, char **argv) {
     return 0;
   }
   QString snapshotError;
+  if (!runNativeExportCheck(snapshotError)) {
+    qWarning().noquote() << snapshotError;
+    return 232;
+  }
   if (parser.isSet(outputChecksOption)) {
     if (!runQuickOutputChecks(snapshotError) ||
         !runPostCaptureChecks(snapshotError, false) ||

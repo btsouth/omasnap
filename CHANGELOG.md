@@ -16,6 +16,9 @@ earlier development is recorded in the [commit history](https://github.com/omaco
 - A lock file left by a crashed capture no longer gets an unrelated omasnap
   process (such as a pin that reused its process ID) closed by the next
   capture; a lock nobody holds is reclaimed instead.
+- Preserve native pixels when exporting an unannotated capture without a
+  backdrop. Fractional selection edges no longer smooth-resize the whole
+  image just to remove an outward-rounded boundary pixel.
 
 ## 1.24.0
 
