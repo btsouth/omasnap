@@ -917,10 +917,58 @@ bool runEarlyMonitorCrossingSmoke(QApplication &application, QString &error) {
   return true;
 }
 
+/** Checks a crossing onto a monitor whose veil is already up: once there,
+ *  a veil that paints later must not send the overlay back where it was. */
+bool runCrossingThenLateVeilSmoke(QApplication &application, QString &error) {
+  const CaptureData first = monitorMoveFixture(
+      QStringLiteral("TEST"), QRect(0, 0, 800, 600), QColor(64, 96, 128));
+  const CaptureData second = monitorMoveFixture(
+      QStringLiteral("TEST-2"), QRect(800, 0, 400, 300), QColor(128, 96, 64));
+  CaptureEditor editor(first, CaptureEditor::CaptureMode::Region);
+  editor.setSuppressSnapshots(true);
+  editor.resize(800, 600);
+  editor.show();
+  application.processEvents();
+  MonitorVeil *left = editor.addMonitorVeilForTest(first);
+  MonitorVeil *right = editor.addMonitorVeilForTest(second);
+  right->show();
+  if (!QTest::qWaitFor([&] { return right->painted(); }, 2000)) {
+    error = QStringLiteral("The veil of the monitor crossed to never painted");
+    return false;
+  }
+  QTest::mouseMove(&editor, QPoint(50, 50));
+  QMouseEvent crossing(QEvent::MouseMove, QPointF(900, 100), QPointF(900, 100),
+                       Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+  QApplication::sendEvent(&editor, &crossing);
+  left->show();
+  if (!QTest::qWaitFor([&] { return left->painted(); }, 2000)) {
+    error = QStringLiteral("The veil of the monitor being left never painted");
+    return false;
+  }
+  QTest::qWait(50);
+  MonitorVeil *third = editor.addMonitorVeilForTest(monitorMoveFixture(
+      QStringLiteral("TEST-3"), QRect(1200, 0, 800, 600), QColor(96, 64, 128)));
+  third->show();
+  if (!QTest::qWaitFor([&] { return third->painted(); }, 2000)) {
+    error = QStringLiteral("The third monitor's veil never painted");
+    return false;
+  }
+  QTest::qWait(50);
+  if (editor.monitorNameForTest() != second.monitor.name) {
+    error = QStringLiteral("After crossing to %1, a later veil moved the "
+                           "overlay to %2, where the pointer is not")
+                .arg(second.monitor.name, editor.monitorNameForTest());
+    return false;
+  }
+  editor.close();
+  return true;
+}
+
 /** Checks a remap back onto this monitor that a drag held up. Cancelled
- *  by Escape, a right click or a release too small to select, the overlay must come back above the veil now
- *  covering it; released as a region still waiting on its backdrop, the
- *  region must survive. */
+ *  by Escape, a right click or a release too small to select, the overlay
+ *  must come back above the veil now covering it; released as a region still
+ *  waiting on its backdrop, the region must survive, and the remap still
+ *  happen if that region is dropped before output. */
 bool runDragHeldMonitorMoveSmoke(QApplication &application, QString &error) {
   const CaptureData first = monitorMoveFixture(
       QStringLiteral("TEST"), QRect(0, 0, 800, 600), QColor(64, 96, 128));
@@ -976,14 +1024,18 @@ bool runDragHeldMonitorMoveSmoke(QApplication &application, QString &error) {
                                "cleared by the remap the drag held up");
         return false;
       }
-      continue;
-    }
-    if (end == End::Escape)
+      // Dropped before the backdrop lands, the region leaves nothing to
+      // output: back to selecting, the held remap must still happen.
+      QTest::keyClick(&editor, Qt::Key_S);
+      backdrop.addResult(QImage());
+      backdrop.finish();
+    } else if (end == End::Escape) {
       QTest::keyClick(&editor, Qt::Key_Escape);
-    else if (end == End::RightClick)
+    } else if (end == End::RightClick) {
       QTest::mouseClick(&editor, Qt::RightButton, Qt::NoModifier, QPoint(300, 300));
-    else
+    } else {
       QTest::mouseRelease(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(101, 101));
+    }
     QTest::qWait(50);
     const QColor shown =
         grabLogicalPixel(editor.grab().toImage(), editor, QPointF(120, 90));
@@ -994,7 +1046,9 @@ bool runDragHeldMonitorMoveSmoke(QApplication &application, QString &error) {
                              "that veil")
                   .arg(end == End::Escape       ? QStringLiteral("Escape")
                        : end == End::RightClick ? QStringLiteral("a right click")
-                                                : QStringLiteral("a tiny release"));
+                       : end == End::TinyRelease
+                           ? QStringLiteral("a tiny release")
+                           : QStringLiteral("dropping a region awaiting its backdrop"));
       return false;
     }
     editor.close();
@@ -12876,6 +12930,10 @@ int main(int argc, char **argv) {
   if (!runDragHeldMonitorMoveSmoke(application, snapshotError)) {
     qWarning().noquote() << snapshotError;
     return 235;
+  }
+  if (!runCrossingThenLateVeilSmoke(application, snapshotError)) {
+    qWarning().noquote() << snapshotError;
+    return 237;
   }
   if (!runPointerDamageRegionCheck(snapshotError)) {
     qWarning().noquote() << snapshotError;

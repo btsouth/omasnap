@@ -3608,6 +3608,7 @@ void CaptureEditor::enterSelectedCapture(QString editStatus) {
 void CaptureEditor::enterExport() {
   if (selection_.isEmpty()) {
     phase_ = Phase::Select;
+    resumeMonitorMove();
     setStatus(QStringLiteral("Could not output an empty selection"));
     updatePointerCursor();
     return;
@@ -5363,6 +5364,7 @@ void CaptureEditor::mouseMoveEvent(QMouseEvent *event) {
   if (phase_ == Phase::Select && !dragging_ &&
       !QRectF(rect()).contains(event->position())) {
     if (const MonitorVeil *veil = monitorVeilAt(event->position())) {
+      cursor_ = event->position();
       followPointerTo(veil->capture().monitor.name);
       return;
     }
@@ -7041,15 +7043,15 @@ const MonitorVeil *CaptureEditor::monitorVeilAt(const QPointF &point) const {
 // By value: the deferred call passes pendingMonitor_ itself, cleared here.
 void CaptureEditor::followPointerTo(QString name) {
   pendingMonitor_.clear();
-  // A capture in flight, a selection waiting on its backdrop, or anything
-  // but the frozen screen stays on the monitor it began on.
+  // A capture in flight, or anything but the frozen screen, stays on the
+  // monitor it began on.
   if (veilsReleased_ || phase_ != Phase::Select || capturePending_ || busy_ ||
-      pendingSelectedCapture_ || scrollPanel_ || handedImage_ ||
-      !hasLiveScreen())
+      scrollPanel_ || handedImage_ || !hasLiveScreen())
     return;
-  // A drag keeps its monitor too, but a remap it held up still has to
-  // happen: the veil it waited for now covers the overlay.
-  if (dragging_) {
+  // A drag, or a selection waiting on its backdrop, keeps its monitor too,
+  // but a remap it held up still has to happen: the veil it waited for now
+  // covers the overlay.
+  if (dragging_ || pendingSelectedCapture_) {
     pendingMonitor_ = std::move(name);
     return;
   }
