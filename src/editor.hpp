@@ -607,6 +607,8 @@ private:
   /// The pointer reached monitor `name`: move the overlay there, once the
   /// monitor being left shows its own veil.
   void followPointerTo(QString name);
+  /// Completes, once the event loop is back, a move a drag held up.
+  void resumeMonitorMove();
   void moveToMonitor(CaptureData capture);
   /// Selection is over: every other monitor goes live again.
   void releaseMonitorVeils();
@@ -960,7 +962,8 @@ private:
   QVector<MonitorVeil *> veils_;
   bool monitorsOffered_ = false;
   bool veilsReleased_ = false;
-  /// Monitor the pointer went to while the one being left had no veil yet.
+  /// Monitor the pointer went to while the one being left had no veil yet,
+  /// or while a drag was in flight.
   QString pendingMonitor_;
   // Background render for --pin.
   /// Path on success, empty + error set on failure. The render and the PNG

@@ -3624,6 +3624,7 @@ void CaptureEditor::handleEscape() {
     }
     dragging_ = false;
     selection_ = {};
+    resumeMonitorMove();
     if (smartMode_)
       hoveredWindow_ = windowAt(cursor_);
     if (smartMode_)
@@ -6130,6 +6131,7 @@ void CaptureEditor::mouseReleaseEvent(QMouseEvent *event) {
   if (phase_ == Phase::Select) {
     selection_ = normalizedSelection(dragStart_, event->position());
     dragging_ = false;
+    resumeMonitorMove();
     const qreal selectedArea = selection_.width() * selection_.height();
     if (smartMode_ && (selectedArea < 20.0 || selection_.width() < 2.0 ||
                        selection_.height() < 2.0)) {
@@ -6970,8 +6972,17 @@ MonitorVeil *CaptureEditor::newMonitorVeil(CaptureData capture) {
   connect(
       veil, &MonitorVeil::firstPainted, this,
       [this] {
-        if (!pendingMonitor_.isEmpty())
+        if (!pendingMonitor_.isEmpty()) {
           followPointerTo(pendingMonitor_);
+          return;
+        }
+        // The pointer may have crossed onto this monitor before its veil
+        // existed, with nothing moving since to say so.
+        if (phase_ == Phase::Select && !dragging_ &&
+            !QRectF(rect()).contains(cursor_)) {
+          if (const MonitorVeil *veil = monitorVeilAt(cursor_))
+            followPointerTo(veil->capture().monitor.name);
+        }
       },
       Qt::QueuedConnection);
   return veil;
@@ -7012,12 +7023,17 @@ const MonitorVeil *CaptureEditor::monitorVeilAt(const QPointF &point) const {
 // By value: the deferred call passes pendingMonitor_ itself, cleared here.
 void CaptureEditor::followPointerTo(QString name) {
   pendingMonitor_.clear();
-  // A drag, a capture in flight, or anything but the frozen screen stays on
-  // the monitor it began on.
-  if (veilsReleased_ || phase_ != Phase::Select || dragging_ ||
-      capturePending_ || busy_ || scrollPanel_ || handedImage_ ||
-      !hasLiveScreen())
+  // A capture in flight, or anything but the frozen screen, stays on the
+  // monitor it began on.
+  if (veilsReleased_ || phase_ != Phase::Select || capturePending_ || busy_ ||
+      scrollPanel_ || handedImage_ || !hasLiveScreen())
     return;
+  // A drag keeps its monitor too, but a remap it held up still has to
+  // happen: the veil it waited for now covers the overlay.
+  if (dragging_) {
+    pendingMonitor_ = std::move(name);
+    return;
+  }
   const MonitorVeil *target = monitorVeil(name);
   if (!target)
     return;
@@ -7031,6 +7047,13 @@ void CaptureEditor::followPointerTo(QString name) {
     return;
   }
   moveToMonitor(target->capture());
+}
+
+void CaptureEditor::resumeMonitorMove() {
+  QTimer::singleShot(0, this, [this] {
+    if (!pendingMonitor_.isEmpty() && !dragging_)
+      followPointerTo(pendingMonitor_);
+  });
 }
 
 void CaptureEditor::moveToMonitor(CaptureData capture) {

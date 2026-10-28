@@ -849,6 +849,109 @@ bool runDeferredMonitorMoveSmoke(QApplication &application, QString &error) {
   return true;
 }
 
+CaptureData monitorMoveFixture(const QString &name, QRect geometry, QColor fill) {
+  CaptureData capture;
+  capture.monitor.name = name;
+  capture.monitor.geometry = geometry;
+  capture.monitor.pixelSize = geometry.size();
+  capture.source = QImage(geometry.size(), QImage::Format_ARGB32_Premultiplied);
+  capture.source.fill(fill);
+  capture.previewSize = capture.source.size();
+  return capture;
+}
+
+/** Checks a crossing made before the other monitor's veil existed: when that
+ *  veil paints, the overlay must follow the pointer without further motion. */
+bool runEarlyMonitorCrossingSmoke(QApplication &application, QString &error) {
+  const CaptureData first = monitorMoveFixture(
+      QStringLiteral("TEST"), QRect(0, 0, 800, 600), QColor(64, 96, 128));
+  const CaptureData second = monitorMoveFixture(
+      QStringLiteral("TEST-2"), QRect(800, 0, 400, 300), QColor(128, 96, 64));
+  CaptureEditor editor(first, CaptureEditor::CaptureMode::Region);
+  editor.setSuppressSnapshots(true);
+  editor.resize(800, 600);
+  editor.show();
+  application.processEvents();
+  MonitorVeil *left = editor.addMonitorVeilForTest(first);
+  left->show();
+  if (!QTest::qWaitFor([&] { return left->painted(); }, 2000)) {
+    error = QStringLiteral("The veil of the monitor being left never painted");
+    return false;
+  }
+  // TEST-2 is still being grabbed when the pointer gets there.
+  QMouseEvent crossing(QEvent::MouseMove, QPointF(900, 100), QPointF(900, 100),
+                       Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+  QApplication::sendEvent(&editor, &crossing);
+  application.processEvents();
+  MonitorVeil *right = editor.addMonitorVeilForTest(second);
+  right->show();
+  if (!QTest::qWaitFor([&] { return right->painted(); }, 2000)) {
+    error = QStringLiteral("The veil of the monitor crossed to never painted");
+    return false;
+  }
+  QTest::qWait(50);
+  if (editor.monitorNameForTest() != second.monitor.name) {
+    error = QStringLiteral("The pointer reached %1 before its veil was ready, "
+                           "and the overlay never followed it there")
+                .arg(second.monitor.name);
+    return false;
+  }
+  editor.close();
+  return true;
+}
+
+/** Checks a remap back onto this monitor that a drag held up: once the drag
+ *  is cancelled, the overlay must come back above the veil now covering it. */
+bool runDragHeldMonitorMoveSmoke(QApplication &application, QString &error) {
+  const CaptureData first = monitorMoveFixture(
+      QStringLiteral("TEST"), QRect(0, 0, 800, 600), QColor(64, 96, 128));
+  // The left veil carries its own green frame so that remapping onto it
+  // shows, dimmed or not.
+  const QColor veiled(32, 160, 96);
+  const CaptureData leftFrame =
+      monitorMoveFixture(first.monitor.name, first.monitor.geometry, veiled);
+  const CaptureData second = monitorMoveFixture(
+      QStringLiteral("TEST-2"), QRect(800, 0, 400, 300), QColor(128, 96, 64));
+  CaptureEditor editor(first, CaptureEditor::CaptureMode::Region);
+  editor.setSuppressSnapshots(true);
+  editor.resize(800, 600);
+  editor.show();
+  application.processEvents();
+  MonitorVeil *left = editor.addMonitorVeilForTest(leftFrame);
+  MonitorVeil *right = editor.addMonitorVeilForTest(second);
+  right->show();
+  if (!QTest::qWaitFor([&] { return right->painted(); }, 2000)) {
+    error = QStringLiteral("The veil of the monitor crossed to never painted");
+    return false;
+  }
+  // Cross before TEST's veil has painted, come back, and start a drag.
+  QMouseEvent crossing(QEvent::MouseMove, QPointF(900, 100), QPointF(900, 100),
+                       Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+  QApplication::sendEvent(&editor, &crossing);
+  QTest::mouseMove(&editor, QPoint(100, 100));
+  QTest::mousePress(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(100, 100));
+  QTest::mouseMove(&editor, QPoint(300, 300));
+  application.processEvents();
+  left->show();
+  if (!QTest::qWaitFor([&] { return left->painted(); }, 2000)) {
+    error = QStringLiteral("The veil of the monitor being left never painted");
+    return false;
+  }
+  QTest::qWait(50);
+  QTest::keyClick(&editor, Qt::Key_Escape);
+  QTest::qWait(50);
+  const QColor shown =
+      grabLogicalPixel(editor.grab().toImage(), editor, QPointF(120, 90));
+  if (editor.monitorNameForTest() != first.monitor.name ||
+      !editor.selectingForTest() || shown.green() <= shown.blue()) {
+    error = QStringLiteral("A drag started before the veil painted dropped the "
+                           "remap, leaving the overlay under that veil");
+    return false;
+  }
+  editor.close();
+  return true;
+}
+
 /** Checks that positional local image targets are recognized. */
 bool runPositionalImageTargetCheck(QString &error) {
   QTemporaryDir directory;
@@ -12666,6 +12769,14 @@ int main(int argc, char **argv) {
   if (!runDeferredMonitorMoveSmoke(application, snapshotError)) {
     qWarning().noquote() << snapshotError;
     return 233;
+  }
+  if (!runEarlyMonitorCrossingSmoke(application, snapshotError)) {
+    qWarning().noquote() << snapshotError;
+    return 234;
+  }
+  if (!runDragHeldMonitorMoveSmoke(application, snapshotError)) {
+    qWarning().noquote() << snapshotError;
+    return 235;
   }
   if (!runPointerDamageRegionCheck(snapshotError)) {
     qWarning().noquote() << snapshotError;
