@@ -897,12 +897,30 @@ bool runEarlyMonitorCrossingSmoke(QApplication &application, QString &error) {
                 .arg(second.monitor.name);
     return false;
   }
+  // A later veil re-checks the same, unmoved pointer: still on TEST-2, not
+  // the monitor its old position would name in TEST-2's coordinates.
+  MonitorVeil *third = editor.addMonitorVeilForTest(monitorMoveFixture(
+      QStringLiteral("TEST-3"), QRect(1200, 0, 800, 600), QColor(96, 64, 128)));
+  third->show();
+  if (!QTest::qWaitFor([&] { return third->painted(); }, 2000)) {
+    error = QStringLiteral("The third monitor's veil never painted");
+    return false;
+  }
+  QTest::qWait(50);
+  if (editor.monitorNameForTest() != second.monitor.name) {
+    error = QStringLiteral("A later veil moved the overlay to %1, where the "
+                           "pointer is not")
+                .arg(editor.monitorNameForTest());
+    return false;
+  }
   editor.close();
   return true;
 }
 
-/** Checks a remap back onto this monitor that a drag held up: once the drag
- *  is cancelled, the overlay must come back above the veil now covering it. */
+/** Checks a remap back onto this monitor that a drag held up. Cancelled
+ *  by Escape, a right click or a release too small to select, the overlay must come back above the veil now
+ *  covering it; released as a region still waiting on its backdrop, the
+ *  region must survive. */
 bool runDragHeldMonitorMoveSmoke(QApplication &application, QString &error) {
   const CaptureData first = monitorMoveFixture(
       QStringLiteral("TEST"), QRect(0, 0, 800, 600), QColor(64, 96, 128));
@@ -913,43 +931,74 @@ bool runDragHeldMonitorMoveSmoke(QApplication &application, QString &error) {
       monitorMoveFixture(first.monitor.name, first.monitor.geometry, veiled);
   const CaptureData second = monitorMoveFixture(
       QStringLiteral("TEST-2"), QRect(800, 0, 400, 300), QColor(128, 96, 64));
-  CaptureEditor editor(first, CaptureEditor::CaptureMode::Region);
-  editor.setSuppressSnapshots(true);
-  editor.resize(800, 600);
-  editor.show();
-  application.processEvents();
-  MonitorVeil *left = editor.addMonitorVeilForTest(leftFrame);
-  MonitorVeil *right = editor.addMonitorVeilForTest(second);
-  right->show();
-  if (!QTest::qWaitFor([&] { return right->painted(); }, 2000)) {
-    error = QStringLiteral("The veil of the monitor crossed to never painted");
-    return false;
+  enum class End { Escape, RightClick, TinyRelease, CommitAwaitingBackdrop };
+  for (const End end : {End::Escape, End::RightClick, End::TinyRelease,
+                        End::CommitAwaitingBackdrop}) {
+    QPromise<QImage> backdrop;
+    CaptureEditor editor(first, CaptureEditor::CaptureMode::Region,
+                         end == End::CommitAwaitingBackdrop
+                             ? QuickOutputMode::Save
+                             : QuickOutputMode::None);
+    editor.setSuppressSnapshots(true);
+    if (end == End::CommitAwaitingBackdrop) {
+      backdrop.start();
+      editor.setBackdropFutureForTest(backdrop.future());
+    }
+    editor.resize(800, 600);
+    editor.show();
+    application.processEvents();
+    MonitorVeil *left = editor.addMonitorVeilForTest(leftFrame);
+    MonitorVeil *right = editor.addMonitorVeilForTest(second);
+    right->show();
+    if (!QTest::qWaitFor([&] { return right->painted(); }, 2000)) {
+      error = QStringLiteral("The veil of the monitor crossed to never painted");
+      return false;
+    }
+    // Cross before TEST's veil has painted, come back, and start a drag.
+    QMouseEvent crossing(QEvent::MouseMove, QPointF(900, 100), QPointF(900, 100),
+                         Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(&editor, &crossing);
+    QTest::mouseMove(&editor, QPoint(100, 100));
+    QTest::mousePress(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(100, 100));
+    QTest::mouseMove(&editor, QPoint(300, 300));
+    application.processEvents();
+    left->show();
+    if (!QTest::qWaitFor([&] { return left->painted(); }, 2000)) {
+      error = QStringLiteral("The veil of the monitor being left never painted");
+      return false;
+    }
+    QTest::qWait(50);
+    if (end == End::CommitAwaitingBackdrop) {
+      QTest::mouseRelease(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(300, 300));
+      QTest::qWait(50);
+      if (editor.currentSelection() != QRectF(100, 100, 200, 200)) {
+        error = QStringLiteral("A region released while its backdrop loaded was "
+                               "cleared by the remap the drag held up");
+        return false;
+      }
+      continue;
+    }
+    if (end == End::Escape)
+      QTest::keyClick(&editor, Qt::Key_Escape);
+    else if (end == End::RightClick)
+      QTest::mouseClick(&editor, Qt::RightButton, Qt::NoModifier, QPoint(300, 300));
+    else
+      QTest::mouseRelease(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(101, 101));
+    QTest::qWait(50);
+    const QColor shown =
+        grabLogicalPixel(editor.grab().toImage(), editor, QPointF(120, 90));
+    if (editor.monitorNameForTest() != first.monitor.name ||
+        !editor.selectingForTest() || shown.green() <= shown.blue()) {
+      error = QStringLiteral("A drag started before the veil painted and ended by "
+                             "%1 dropped the remap, leaving the overlay under "
+                             "that veil")
+                  .arg(end == End::Escape       ? QStringLiteral("Escape")
+                       : end == End::RightClick ? QStringLiteral("a right click")
+                                                : QStringLiteral("a tiny release"));
+      return false;
+    }
+    editor.close();
   }
-  // Cross before TEST's veil has painted, come back, and start a drag.
-  QMouseEvent crossing(QEvent::MouseMove, QPointF(900, 100), QPointF(900, 100),
-                       Qt::NoButton, Qt::NoButton, Qt::NoModifier);
-  QApplication::sendEvent(&editor, &crossing);
-  QTest::mouseMove(&editor, QPoint(100, 100));
-  QTest::mousePress(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(100, 100));
-  QTest::mouseMove(&editor, QPoint(300, 300));
-  application.processEvents();
-  left->show();
-  if (!QTest::qWaitFor([&] { return left->painted(); }, 2000)) {
-    error = QStringLiteral("The veil of the monitor being left never painted");
-    return false;
-  }
-  QTest::qWait(50);
-  QTest::keyClick(&editor, Qt::Key_Escape);
-  QTest::qWait(50);
-  const QColor shown =
-      grabLogicalPixel(editor.grab().toImage(), editor, QPointF(120, 90));
-  if (editor.monitorNameForTest() != first.monitor.name ||
-      !editor.selectingForTest() || shown.green() <= shown.blue()) {
-    error = QStringLiteral("A drag started before the veil painted dropped the "
-                           "remap, leaving the overlay under that veil");
-    return false;
-  }
-  editor.close();
   return true;
 }
 

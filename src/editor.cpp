@@ -5748,6 +5748,7 @@ void CaptureEditor::mousePressEvent(QMouseEvent *event) {
       if (dragging_) {
         dragging_ = false;
         selection_ = {};
+        resumeMonitorMove();
         if (smartMode_)
           hoveredWindow_ = windowAt(cursor_);
         update();
@@ -6802,6 +6803,7 @@ void CaptureEditor::setScrollMode(bool enabled) {
     windowMode_ = false;
   dragging_ = false;
   selection_ = {};
+  resumeMonitorMove();
   hoveredWindow_ = -1;
   setStatus(enabled ? QStringLiteral("Drag to select a scrolling region · the "
                                      "page inside stays live")
@@ -7039,10 +7041,11 @@ const MonitorVeil *CaptureEditor::monitorVeilAt(const QPointF &point) const {
 // By value: the deferred call passes pendingMonitor_ itself, cleared here.
 void CaptureEditor::followPointerTo(QString name) {
   pendingMonitor_.clear();
-  // A capture in flight, or anything but the frozen screen, stays on the
-  // monitor it began on.
+  // A capture in flight, a selection waiting on its backdrop, or anything
+  // but the frozen screen stays on the monitor it began on.
   if (veilsReleased_ || phase_ != Phase::Select || capturePending_ || busy_ ||
-      scrollPanel_ || handedImage_ || !hasLiveScreen())
+      pendingSelectedCapture_ || scrollPanel_ || handedImage_ ||
+      !hasLiveScreen())
     return;
   // A drag keeps its monitor too, but a remap it held up still has to
   // happen: the veil it waited for now covers the overlay.
@@ -7080,6 +7083,10 @@ void CaptureEditor::moveToMonitor(CaptureData capture) {
       break;
     }
   }
+  // The pointer has not moved: keep its last position in the new monitor's
+  // coordinates, which a veil's first paint reads.
+  cursor_ += QPointF(capture_.monitor.geometry.topLeft() -
+                     capture.monitor.geometry.topLeft());
   adoptScreen(std::move(capture));
   selection_ = {};
   hoveredWindow_ = -1;
