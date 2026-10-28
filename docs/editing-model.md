@@ -82,6 +82,8 @@ it is ignored, and the image opens without layers. One that does not parse as
 JSON, or is a log of another version, still fails, since it may be omasnap's
 own, cut short or newer. Untagged images retain
 their pixel dimensions: print DPI does not establish screenshot display scale.
+A tag or log whose logical size would mean a scale outside 1 to 4 on either
+axis is ignored, so a hand-made value cannot blow up the frame or the view.
 
 ## The two exceptions, and why they're still safe
 
