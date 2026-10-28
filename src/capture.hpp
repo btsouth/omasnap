@@ -308,8 +308,15 @@ void describeFileCapture(CaptureData &capture, QImage image,
  *  doesn't match one. */
 [[nodiscard]] bool backgroundStyleFromName(const QString &name,
                                            BackgroundStyle &style);
-/** Loads the current Wayland clipboard image. */
-[[nodiscard]] bool loadClipboardImage(QImage &image, QString &error);
+/** Largest encoded clipboard image `--clipboard` reads: 256 MiB, well above
+ *  any real screenshot PNG. */
+inline constexpr qint64 kMaxClipboardImageBytes = qint64(256) * 1024 * 1024;
+/** Loads the current Wayland clipboard image. A format is skipped once
+ *  wl-paste delivers more than `maxImageBytes` of it, and the image refused
+ *  when no other offered format loads; only tests pass another limit. */
+[[nodiscard]] bool loadClipboardImage(
+    QImage &image, QString &error,
+    qint64 maxImageBytes = kMaxClipboardImageBytes);
 [[nodiscard]] bool copyPngFileToClipboard(const QString &path, QString &error);
 [[nodiscard]] bool copyImageToClipboard(const QImage &image, QString &error);
 [[nodiscard]] bool quickOutput(QImage image, QuickOutputMode mode,

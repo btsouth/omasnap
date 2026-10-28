@@ -14319,6 +14319,10 @@ int main(int argc, char **argv) {
     qWarning().noquote() << clipboardError;
     return 88;
   }
+  if (!runClipboardSizeLimitSmoke(clipboardError)) {
+    qWarning().noquote() << clipboardError;
+    return 234;
+  }
 
   QString transformError;
   if (!runTransformSmoke(transformError)) {
