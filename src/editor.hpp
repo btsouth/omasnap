@@ -607,6 +607,8 @@ private:
   /// The pointer reached monitor `name`: move the overlay there, once the
   /// monitor being left shows its own veil.
   void followPointerTo(QString name);
+  /// Retries using the latest pointer position once a veil or drag is ready.
+  void retryMonitorMove();
   /// Completes, once the event loop is back, a move a drag held up.
   void resumeMonitorMove();
   void moveToMonitor(CaptureData capture);

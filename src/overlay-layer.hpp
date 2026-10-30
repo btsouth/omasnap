@@ -7,6 +7,8 @@
 #include <QWidget>
 
 class QPaintEvent;
+class QMouseEvent;
+class QEnterEvent;
 class QScreen;
 namespace LayerShellQt {
 class Window;
@@ -22,9 +24,9 @@ configureOverlayLayer(QWidget &widget, QScreen *screen, bool takesKeyboard);
 /**
  * A monitor the select overlay is not on, frozen when the capture started:
  * its frame under the same dim the overlay paints, so every screen reads as
- * waiting for a selection. It takes no input. Hyprland routes the pointer to
- * the overlay's exclusive-keyboard surface wherever it is, so the overlay
- * sees it cross onto this monitor and moves over to take this frame.
+ * waiting for a selection. Keyboard input stays with the picker. Pointer
+ * arrival is forwarded too: newer Hyprland versions send motion to the veil
+ * instead of keeping it on the picker's exclusive-keyboard surface.
  */
 class MonitorVeil final : public QWidget {
   Q_OBJECT
@@ -41,9 +43,12 @@ public:
 
 signals:
   void firstPainted();
+  void pointerMoved(const QPointF &position);
 
 protected:
   void paintEvent(QPaintEvent *event) override;
+  void mouseMoveEvent(QMouseEvent *event) override;
+  void enterEvent(QEnterEvent *event) override;
 
 private:
   CaptureData capture_;

@@ -38,6 +38,8 @@
 #include "icons.hpp"
 
 #include <QApplication>
+#include <LayerShellQt/Window>
+#include <QPointer>
 #include <QBackingStore>
 #include <QTextBlock>
 #include <QTextLayout>
@@ -1054,6 +1056,226 @@ bool runDragHeldMonitorMoveSmoke(QApplication &application, QString &error) {
     }
     editor.close();
   }
+  return true;
+}
+
+/** Hyprland can deliver pointer arrival to the veil instead of the picker. */
+bool runVeilPointerMoveSmoke(QApplication &application, QString &error) {
+  for (const bool enter : {false, true}) {
+    const CaptureData first = monitorMoveFixture(
+        QStringLiteral("TEST"), QRect(0, 0, 800, 600), QColor(64, 96, 128));
+    const CaptureData second = monitorMoveFixture(
+        QStringLiteral("TEST-2"), QRect(800, 0, 800, 600), QColor(128, 96, 64));
+    CaptureEditor editor(first, CaptureEditor::CaptureMode::Region);
+    editor.setSuppressSnapshots(true);
+    editor.resize(800, 600);
+    editor.show();
+    application.processEvents();
+    MonitorVeil *left = editor.addMonitorVeilForTest(first);
+    MonitorVeil *right = editor.addMonitorVeilForTest(second);
+    left->show();
+    if (!QTest::qWaitFor([&] { return left->painted(); }, 2000)) {
+      error = QStringLiteral("Outgoing veil never painted for pointer forwarding");
+      return false;
+    }
+    if (enter) {
+      QEnterEvent event(QPointF(100, 100), QPointF(100, 100), QPointF(900, 100));
+      QApplication::sendEvent(right, &event);
+    } else {
+      QMouseEvent event(QEvent::MouseMove, QPointF(100, 100), QPointF(900, 100),
+                        Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+      QApplication::sendEvent(right, &event);
+    }
+    if (editor.monitorNameForTest() != second.monitor.name) {
+      error = QStringLiteral("Pointer arrival on a veil did not move the picker");
+      return false;
+    }
+    right->show();
+    if (!QTest::qWaitFor([&] { return right->painted(); }, 2000)) {
+      error = QStringLiteral("Destination veil never painted before repeated input");
+      return false;
+    }
+    // Repeated events from the veil now underneath this picker must not
+    // reload its old frozen frame or remap the same monitor again.
+    CaptureData refreshed = second;
+    refreshed.source.fill(QColor(32, 160, 96));
+    editor.moveToMonitorForTest(refreshed);
+    QMouseEvent repeated(QEvent::MouseMove, QPointF(100, 100), QPointF(900, 100),
+                         Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(right, &repeated);
+    const QColor shown = grabLogicalPixel(editor.grab().toImage(), editor, QPointF(300, 300));
+    if (shown.green() <= shown.red()) {
+      error = QStringLiteral("A same-monitor veil event reloaded the capture");
+      return false;
+    }
+    editor.close();
+  }
+  return true;
+}
+
+/** A real LayerShellQt handle must reject a frame with no matching QScreen.
+ *  Synthetic offscreen monitor moves remain supported without that handle. */
+bool runDisconnectedMonitorMoveSmoke(QApplication &application, QString &error) {
+  const CaptureData first = monitorMoveFixture(
+      QStringLiteral("TEST"), QRect(0, 0, 800, 600), QColor(64, 96, 128));
+  const CaptureData gone = monitorMoveFixture(
+      QStringLiteral("DISCONNECTED"), QRect(800, 0, 800, 600), QColor(200, 32, 16));
+  for (const bool viaVeil : {false, true}) {
+    CaptureEditor editor(first, CaptureEditor::CaptureMode::Region);
+    editor.setSuppressSnapshots(true);
+    editor.resize(800, 600);
+    editor.show();
+    application.processEvents();
+    auto *layer = LayerShellQt::Window::get(editor.windowHandle());
+    if (!layer) {
+      error = QStringLiteral("Could not create a layer handle for disconnect check");
+      return false;
+    }
+    editor.setLayerWindow(layer);
+    QPointer<MonitorVeil> left = editor.addMonitorVeilForTest(first);
+    QPointer<MonitorVeil> right = editor.addMonitorVeilForTest(gone);
+    QMouseEvent crossing(QEvent::MouseMove, QPointF(900, 100), QPointF(900, 100),
+                         Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+    if (viaVeil) {
+      left->show();
+      if (!QTest::qWaitFor([&] { return left->painted(); }, 2000)) {
+        error = QStringLiteral("Outgoing veil never painted for event-lifetime check");
+        return false;
+      }
+      QMouseEvent arrival(QEvent::MouseMove, QPointF(100, 100), QPointF(900, 100),
+                          Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+      QApplication::sendEvent(right, &arrival);
+      if (!right) {
+        error = QStringLiteral("Disconnect deleted the veil inside its own pointer event");
+        return false;
+      }
+    } else {
+      QApplication::sendEvent(&editor, &crossing);
+      // The destination has disappeared by the time the departing veil paints.
+      left->show();
+    }
+    if (!QTest::qWaitFor([&] { return left.isNull(); }, 2000)) {
+      error = QStringLiteral("Disconnected move left a veil covering the picker");
+      return false;
+    }
+    if (right || editor.monitorNameForTest() != first.monitor.name) {
+      error = QStringLiteral("Disconnected move adopted the wrong capture or kept its veil");
+      return false;
+    }
+    QTest::mousePress(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(100, 100));
+    QTest::mouseMove(&editor, QPoint(300, 300));
+    QTest::mouseRelease(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(300, 300));
+    application.processEvents();
+    const QImage output = editor.renderCurrentOutput();
+    if (!editor.editingForTest() || output.size() != QSize(200, 200) ||
+        output.pixelColor(50, 50) != first.source.pixelColor(150, 150)) {
+      error = QStringLiteral("Selection after a disconnected move used the wrong pixels");
+      return false;
+    }
+    editor.close();
+  }
+  return true;
+}
+
+/** A held move must follow a later crossing even if its veil arrived last. */
+bool runLatestHeldMonitorMoveSmoke(QApplication &application, QString &error) {
+  for (const bool thirdPaintsFirst : {false, true}) {
+    const CaptureData first = monitorMoveFixture(
+        QStringLiteral("TEST"), QRect(0, 0, 800, 600), QColor(64, 96, 128));
+    const CaptureData second = monitorMoveFixture(
+        QStringLiteral("TEST-2"), QRect(800, 0, 800, 600), QColor(128, 96, 64));
+    const CaptureData third = monitorMoveFixture(
+        QStringLiteral("TEST-3"), QRect(1600, 0, 800, 600), QColor(96, 64, 128));
+    QPromise<QImage> backdrop;
+    backdrop.start();
+    CaptureEditor editor(first, CaptureEditor::CaptureMode::Region, QuickOutputMode::Save);
+    editor.setSuppressSnapshots(true);
+    editor.setBackdropFutureForTest(backdrop.future());
+    editor.resize(800, 600);
+    editor.show();
+    application.processEvents();
+    MonitorVeil *left = editor.addMonitorVeilForTest(first);
+    editor.addMonitorVeilForTest(second);
+    QMouseEvent crossing(QEvent::MouseMove, QPointF(900, 100), QPointF(900, 100),
+                         Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(&editor, &crossing);
+    // Commit a region while the outgoing veil and custom backdrop are pending.
+    QTest::mousePress(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(100, 100));
+    QTest::mouseMove(&editor, QPoint(300, 300));
+    QTest::mouseRelease(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(300, 300));
+    QApplication::sendEvent(&editor, &crossing);
+    QMouseEvent onward(QEvent::MouseMove, QPointF(1700, 100), QPointF(1700, 100),
+                       Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(&editor, &onward);
+    MonitorVeil *last = nullptr;
+    if (thirdPaintsFirst) {
+      last = editor.addMonitorVeilForTest(third);
+      last->show();
+      if (!QTest::qWaitFor([&] { return last->painted(); }, 2000)) {
+        error = QStringLiteral("Third monitor's veil never painted during held move");
+        return false;
+      }
+    }
+    left->show();
+    if (!QTest::qWaitFor([&] { return left->painted(); }, 2000)) {
+      error = QStringLiteral("Outgoing veil never painted during held move");
+      return false;
+    }
+    QTest::qWait(30);
+    if (editor.currentSelection() != QRectF(100, 100, 200, 200)) {
+      error = QStringLiteral("A held switch cleared the committed region");
+      return false;
+    }
+    QTest::keyClick(&editor, Qt::Key_S);
+    backdrop.addResult(QImage());
+    backdrop.finish();
+    QTest::qWait(50);
+    if (!thirdPaintsFirst) {
+      last = editor.addMonitorVeilForTest(third);
+      last->show();
+    }
+    if (!QTest::qWaitFor([&] { return editor.monitorNameForTest() == third.monitor.name; }, 2000)) {
+      error = QStringLiteral("A held switch chose an old target over the latest pointer position");
+      return false;
+    }
+    editor.close();
+  }
+  return true;
+}
+
+/** Read the backing store before grab() repaints: no old crosshair may remain. */
+bool runDeferredCrosshairRepaintSmoke(QApplication &application, QString &error) {
+  const CaptureData first = monitorMoveFixture(
+      QStringLiteral("TEST"), QRect(0, 0, 800, 600), QColor(64, 96, 128));
+  const CaptureData second = monitorMoveFixture(
+      QStringLiteral("TEST-2"), QRect(800, 0, 800, 600), QColor(128, 96, 64));
+  CaptureEditor editor(first, CaptureEditor::CaptureMode::Region);
+  editor.setSuppressSnapshots(true);
+  editor.resize(800, 600);
+  editor.show();
+  application.processEvents();
+  editor.addMonitorVeilForTest(first);
+  editor.addMonitorVeilForTest(second);
+  QTest::mouseMove(&editor, QPoint(250, 200));
+  QTest::qWait(30);
+  QMouseEvent crossing(QEvent::MouseMove, QPointF(900, 100), QPointF(900, 100),
+                       Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+  QApplication::sendEvent(&editor, &crossing);
+  QTest::mouseMove(&editor, QPoint(100, 100));
+  QTest::qWait(30);
+  QPaintDevice *device = editor.backingStore()->paintDevice();
+  if (!device || device->devType() != QInternal::Image) {
+    error = QStringLiteral("Cannot read backing store for deferred crosshair check");
+    return false;
+  }
+  const QImage shown = static_cast<QImage *>(device)->copy();
+  const QImage fresh = editor.grab().toImage();
+  if (!colorNear(grabLogicalPixel(shown, editor, QPointF(250, 350)),
+                 grabLogicalPixel(fresh, editor, QPointF(250, 350)), 2)) {
+    error = QStringLiteral("A deferred crossing left the old crosshair in the backing store");
+    return false;
+  }
+  editor.close();
   return true;
 }
 
@@ -12924,6 +13146,9 @@ int main(int argc, char **argv) {
       QStringLiteral("output-checks"), QStringLiteral("Run only output checks."));
   parser.addOption(outputDirectoryOption);
   parser.addOption(outputChecksOption);
+  const QCommandLineOption monitorChecksOption(
+      QStringLiteral("monitor-checks"), QStringLiteral("Run only monitor selection checks."));
+  parser.addOption(monitorChecksOption);
   parser.process(application);
   if (!parser.positionalArguments().isEmpty()) {
     qCritical("Unexpected positional argument; use --output-dir <directory>.");
@@ -13027,6 +13252,46 @@ int main(int argc, char **argv) {
   }
   CollapseShortcutGuides collapseGuides;
   application.installEventFilter(&collapseGuides);
+  if (parser.isSet(monitorChecksOption)) {
+    bool ok = true;
+    if (!runMonitorMoveSmoke(application, snapshotError)) {
+      qWarning().noquote() << "MonitorMove:" << snapshotError;
+      ok = false;
+    }
+    if (!runDeferredMonitorMoveSmoke(application, snapshotError)) {
+      qWarning().noquote() << "DeferredMonitorMove:" << snapshotError;
+      ok = false;
+    }
+    if (!runEarlyMonitorCrossingSmoke(application, snapshotError)) {
+      qWarning().noquote() << "EarlyMonitorCrossing:" << snapshotError;
+      ok = false;
+    }
+    if (!runDragHeldMonitorMoveSmoke(application, snapshotError)) {
+      qWarning().noquote() << "DragHeldMonitorMove:" << snapshotError;
+      ok = false;
+    }
+    if (!runCrossingThenLateVeilSmoke(application, snapshotError)) {
+      qWarning().noquote() << "CrossingThenLateVeil:" << snapshotError;
+      ok = false;
+    }
+    if (!runDisconnectedMonitorMoveSmoke(application, snapshotError)) {
+      qWarning().noquote() << "DisconnectedMonitorMove:" << snapshotError;
+      ok = false;
+    }
+    if (!runLatestHeldMonitorMoveSmoke(application, snapshotError)) {
+      qWarning().noquote() << "LatestHeldMonitorMove:" << snapshotError;
+      ok = false;
+    }
+    if (!runDeferredCrosshairRepaintSmoke(application, snapshotError)) {
+      qWarning().noquote() << "DeferredCrosshairRepaint:" << snapshotError;
+      ok = false;
+    }
+    if (!runVeilPointerMoveSmoke(application, snapshotError)) {
+      qWarning().noquote() << "VeilPointerMove:" << snapshotError;
+      ok = false;
+    }
+    return ok ? 0 : 1;
+  }
   if (!runScrollFocusSmoke(snapshotError)) {
     qWarning().noquote() << snapshotError;
     return 224;
@@ -13111,6 +13376,22 @@ int main(int argc, char **argv) {
   if (!runCrossingThenLateVeilSmoke(application, snapshotError)) {
     qWarning().noquote() << snapshotError;
     return 242;
+  }
+  if (!runDisconnectedMonitorMoveSmoke(application, snapshotError)) {
+    qWarning().noquote() << snapshotError;
+    return 243;
+  }
+  if (!runLatestHeldMonitorMoveSmoke(application, snapshotError)) {
+    qWarning().noquote() << snapshotError;
+    return 244;
+  }
+  if (!runDeferredCrosshairRepaintSmoke(application, snapshotError)) {
+    qWarning().noquote() << snapshotError;
+    return 245;
+  }
+  if (!runVeilPointerMoveSmoke(application, snapshotError)) {
+    qWarning().noquote() << snapshotError;
+    return 246;
   }
   if (!runPointerDamageRegionCheck(snapshotError)) {
     qWarning().noquote() << snapshotError;

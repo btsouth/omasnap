@@ -5,6 +5,8 @@
 #include <LayerShellQt/Window>
 
 #include <QColor>
+#include <QEnterEvent>
+#include <QMouseEvent>
 #include <QGuiApplication>
 #include <QObject>
 #include <QPainter>
@@ -52,6 +54,7 @@ MonitorVeil::MonitorVeil(CaptureData capture, QColor scrim)
   // Only the overlay decides when the capture is over.
   setAttribute(Qt::WA_QuitOnClose, false);
   setAttribute(Qt::WA_OpaquePaintEvent);
+  setMouseTracking(true);
 }
 
 bool MonitorVeil::present() {
@@ -81,4 +84,12 @@ void MonitorVeil::paintEvent(QPaintEvent *event) {
     painted_ = true;
     emit firstPainted();
   }
+}
+
+void MonitorVeil::mouseMoveEvent(QMouseEvent *event) {
+  emit pointerMoved(event->position());
+}
+
+void MonitorVeil::enterEvent(QEnterEvent *event) {
+  emit pointerMoved(event->position());
 }

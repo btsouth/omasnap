@@ -5359,13 +5359,19 @@ void CaptureEditor::mouseMoveEvent(QMouseEvent *event) {
     panAnchor_ = event->position();
     return;
   }
+  LiveCanvas oldCanvas;
+  const QRegion oldPointerVisual = pointerMotionRegion(cursor_, &oldCanvas);
   // Hyprland keeps pointer focus on this exclusive-keyboard surface across
   // monitors, so motion past its edge is the pointer on another monitor.
   if (phase_ == Phase::Select && !dragging_ &&
       !QRectF(rect()).contains(event->position())) {
     if (const MonitorVeil *veil = monitorVeilAt(event->position())) {
       cursor_ = event->position();
-      followPointerTo(veil->capture().monitor.name);
+      const QString target = veil->capture().monitor.name;
+      // A deferred crossing still removes the old crosshair from this
+      // surface. It may remain mapped until its outgoing veil paints.
+      queuePointerRepaint(oldPointerVisual | pointerMotionRegion(cursor_));
+      followPointerTo(target);
       return;
     }
   } else if (!pendingMonitor_.isEmpty()) {
@@ -5373,8 +5379,6 @@ void CaptureEditor::mouseMoveEvent(QMouseEvent *event) {
     // this overlay, so the move becomes a remap on this monitor.
     pendingMonitor_ = capture_.monitor.name;
   }
-  LiveCanvas oldCanvas;
-  const QRegion oldPointerVisual = pointerMotionRegion(cursor_, &oldCanvas);
   const QRectF oldSelection = selection_;
   const int oldHoveredWindow = hoveredWindow_;
   cursor_ = event->position();
@@ -6988,28 +6992,33 @@ void CaptureEditor::offerOtherMonitors() {
 MonitorVeil *CaptureEditor::newMonitorVeil(CaptureData capture) {
   auto *veil = new MonitorVeil(std::move(capture),
                                chromeAlpha(chromeTheme().scrim, kBackdropDim));
+  const QString name = veil->capture().monitor.name;
+  const QPoint origin = veil->capture().monitor.geometry.topLeft();
+  connect(veil, &MonitorVeil::pointerMoved, this,
+          [this, name, origin](const QPointF &position) {
+            if (phase_ != Phase::Select || dragging_ || veilsReleased_)
+              return;
+            const QRegion oldPointer = pointerMotionRegion(cursor_);
+            cursor_ = QPointF(origin - capture_.monitor.geometry.topLeft()) + position;
+            queuePointerRepaint(oldPointer | pointerMotionRegion(cursor_));
+            // A veil underneath the picker may still receive queued input.
+            // Only a held remap needs to raise this monitor's picker again.
+            if (name != capture_.monitor.name || !pendingMonitor_.isEmpty())
+              followPointerTo(name);
+          });
   // Queued: the frame reaches the compositor after paintEvent returns.
   connect(
       veil, &MonitorVeil::firstPainted, this,
-      [this] {
-        if (!pendingMonitor_.isEmpty()) {
-          followPointerTo(pendingMonitor_);
-          return;
-        }
-        // The pointer may have crossed onto this monitor before its veil
-        // existed, with nothing moving since to say so.
-        if (phase_ == Phase::Select && !dragging_ &&
-            !QRectF(rect()).contains(cursor_)) {
-          if (const MonitorVeil *veil = monitorVeilAt(cursor_))
-            followPointerTo(veil->capture().monitor.name);
-        }
-      },
+      [this] { retryMonitorMove(); },
       Qt::QueuedConnection);
   return veil;
 }
 
 MonitorVeil *CaptureEditor::addMonitorVeilForTest(CaptureData capture) {
   MonitorVeil *veil = newMonitorVeil(std::move(capture));
+  // These monitors are synthetic: painting a veil must not inject native
+  // pointer arrivals from the offscreen platform's unrelated cursor.
+  veil->setAttribute(Qt::WA_DontShowOnScreen);
   veils_.push_back(veil);
   return veil;
 }
@@ -7070,11 +7079,26 @@ void CaptureEditor::followPointerTo(QString name) {
   moveToMonitor(target->capture());
 }
 
+void CaptureEditor::retryMonitorMove() {
+  if (phase_ != Phase::Select || veilsReleased_)
+    return;
+  if (!pendingMonitor_.isEmpty()) {
+    QString name = pendingMonitor_;
+    if (!dragging_ && !pendingSelectedCapture_) {
+      // The pointer may have crossed again while a veil or backdrop was
+      // loading. An old held target must never win over its latest position.
+      const MonitorVeil *latest = monitorVeilAt(cursor_);
+      name = latest ? latest->capture().monitor.name : capture_.monitor.name;
+    }
+    followPointerTo(std::move(name));
+  } else if (!dragging_ && !QRectF(rect()).contains(cursor_)) {
+    if (const MonitorVeil *latest = monitorVeilAt(cursor_))
+      followPointerTo(latest->capture().monitor.name);
+  }
+}
+
 void CaptureEditor::resumeMonitorMove() {
-  QTimer::singleShot(0, this, [this] {
-    if (!pendingMonitor_.isEmpty() && !dragging_)
-      followPointerTo(pendingMonitor_);
-  });
+  QTimer::singleShot(0, this, [this] { retryMonitorMove(); });
 }
 
 void CaptureEditor::moveToMonitor(CaptureData capture) {
@@ -7084,6 +7108,25 @@ void CaptureEditor::moveToMonitor(CaptureData capture) {
       target = screen;
       break;
     }
+  }
+  if (layer_ && !target) {
+    // A disconnected output's frozen frame must not replace the current
+    // capture. Its veil may have migrated here, and the outgoing veil may
+    // cover the picker already: remove both so selection remains usable.
+    for (auto it = veils_.begin(); it != veils_.end();) {
+      const QString name = (*it)->capture().monitor.name;
+      if (name == capture.monitor.name || name == capture_.monitor.name) {
+        MonitorVeil *veil = *it;
+        it = veils_.erase(it);
+        veil->hide();
+        // This can be the sender of pointerMoved, still in its enter/move
+        // event. Uncover the picker now, destroy the widget after dispatch.
+        veil->deleteLater();
+      } else {
+        ++it;
+      }
+    }
+    return;
   }
   // The pointer has not moved: keep its last position in the new monitor's
   // coordinates, which a veil's first paint reads.
